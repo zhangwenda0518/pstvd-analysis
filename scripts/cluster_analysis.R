@@ -410,7 +410,8 @@ glidsearch <- function(output_dpath, depth_data_fpath, prior.pca = FALSE, verbos
         n_processed <- n_processed + 1
         pct <- floor(n_processed / n_processes * 100)
         if (verbose && pct > last_pct) {
-            message(sprintf('  [%3d%%] %d/%d 网格搜索完成', pct, n_processed, n_processes))
+            message(sprintf('>>> 种子 %d  [%3d%%] %d/%d 网格搜索',
+                    RAND_SEED, pct, n_processed, n_processes))
             last_pct <- pct
         }
     }}}
@@ -551,7 +552,7 @@ main <- function(depth_data_fpath, output_dir, seed = 1:100,
         results <- parallel::mclapply(
             seq_along(seed), run_one_seed,
             seed_pool = seed, depth_fpath = depth_data_fpath, out_dir = output_dir,
-            verbose = FALSE,  # 并行模式静默
+            verbose = TRUE,
             mc.cores = min(n_cores, length(seed))
         )
         elapsed <- difftime(Sys.time(), t0, units = "mins")
