@@ -287,12 +287,8 @@ umap_cv <- function(d,
     d_region <- d_region[rowSums(d_region) < ncol(d_region), , drop = FALSE]
     d_region <- unique(d_region)
 
-    # 维度信息（每个种子仅首次输出，避免 504 次刷屏）
-    if (!exists("DIM_PRINTED") || !DIM_PRINTED) {
-        message(sprintf('>>> 种子 %d  矩阵 %d行 x %d列',
-                RAND_SEED, nrow(d_region), ncol(d_region)))
-        DIM_PRINTED <<- TRUE
-    }
+    # 维度信息存储到全局变量，供 glidsearch 进度条使用
+    DIM_STR <<- sprintf('%d行 x %d列', nrow(d_region), ncol(d_region))
 
     if (nrow(d_region) < 2) {
         if (plot_fig) return(list(pca = NULL, umap = NULL))
@@ -417,8 +413,9 @@ glidsearch <- function(output_dpath, depth_data_fpath, prior.pca = FALSE, verbos
         n_processed <- n_processed + 1
         pct <- floor(n_processed / n_processes * 100)
         if (verbose && pct > last_pct) {
-            message(sprintf('>>> 种子 %d  [%3d%%] %d/%d 网格搜索',
-                    RAND_SEED, pct, n_processed, n_processes))
+            dim_info <- if (exists("DIM_STR")) DIM_STR else ""
+            message(sprintf('>>> 种子 %d  矩阵 %s  进度 [%3d%%] %d/%d 网格搜索',
+                    RAND_SEED, dim_info, pct, n_processed, n_processes))
             last_pct <- pct
         }
     }}}
@@ -545,7 +542,6 @@ main <- function(depth_data_fpath, output_dir, seed = 1:100,
         }
 
         dir.create(rdpath, showWarnings = FALSE, recursive = TRUE)
-        DIM_PRINTED <<- FALSE  # 每个种子重置维度输出标志
         if (verbose) message(sprintf(">>> 种子 %d/%d (seed=%d)", s, length(seed_pool), this_seed))
         glidsearch(rdpath, depth_fpath, verbose = verbose)
         parse_glidsearch_results(rdpath, depth_fpath)
