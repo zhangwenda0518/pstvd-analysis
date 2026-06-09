@@ -287,8 +287,6 @@ umap_cv <- function(d,
     d_region <- d_region[rowSums(d_region) < ncol(d_region), , drop = FALSE]
     d_region <- unique(d_region)
 
-    print(dim(d_region))
-
     if (nrow(d_region) < 2) {
         if (plot_fig) return(list(pca = NULL, umap = NULL))
         return(NULL)
@@ -375,7 +373,7 @@ umap_cv <- function(d,
 
 
 
-glidsearch <- function(output_dpath, depth_data_fpath, prior.pca = FALSE) {
+glidsearch <- function(output_dpath, depth_data_fpath, prior.pca = FALSE, verbose = TRUE) {
     class_eval_stats <- NULL
 
     CUTOFF_VIROIDS <- rbind(c(0, 400), c(0, 300), c(0, 280), c(0, 260),
@@ -387,7 +385,7 @@ glidsearch <- function(output_dpath, depth_data_fpath, prior.pca = FALSE) {
     cls_data <- NULL
 
     # load alignment results
-    d <- read_tsv(depth_data_fpath, col_names = TRUE, show_col_types = FALSE)
+    d <- read_tsv(depth_data_fpath, col_names = TRUE, show_col_types = FALSE, name_repair = "minimal")
 
     n_processes <- nrow(CUTOFF_VIROIDS) * length(CUTOFF_DEPTH) * length(CUTOFF_ALNLEN)
     n_processed <- 0
@@ -411,7 +409,7 @@ glidsearch <- function(output_dpath, depth_data_fpath, prior.pca = FALSE) {
 
         n_processed <- n_processed + 1
         pct <- floor(n_processed / n_processes * 100)
-        if (pct > last_pct) {
+        if (verbose && pct > last_pct) {
             message(sprintf('  [%3d%%] %d/%d 网格搜索完成', pct, n_processed, n_processes))
             last_pct <- pct
         }
@@ -446,7 +444,7 @@ parse_glidsearch_results <- function(dpath, depth_data_fpath) {
 
         fpath_prefix <- paste(as.character(p)[1:8], sep='', collapse='__')
         if (is.null(d)) {
-            d <- read_tsv(depth_data_fpath, col_names = TRUE, show_col_types = FALSE)
+            d <- read_tsv(depth_data_fpath, col_names = TRUE, show_col_types = FALSE, name_repair = "minimal")
         }
         f <- umap_cv(d,
                      c(p$cutoff_viroid_lo, p$cutoff_viroid_up), p$cutoff_depth, p$cutoff_align_len,
@@ -524,7 +522,7 @@ main <- function(depth_data_fpath, output_dir, seed = 1:100,
     dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
     # ---- 每个种子独立运行的工作函数 ----
-    run_one_seed <- function(s, seed_pool, depth_fpath, out_dir) {
+    run_one_seed <- function(s, seed_pool, depth_fpath, out_dir, verbose) {
         this_seed <- seed_pool[s]
         RAND_SEED <<- this_seed
         rdpath <- file.path(out_dir, paste0('umap_seed', this_seed))
@@ -533,15 +531,16 @@ main <- function(depth_data_fpath, output_dir, seed = 1:100,
         csv_files <- list.files(file.path(rdpath, 'figures'),
                                 pattern = '-data\\.csv$', full.names = FALSE)
         if (length(csv_files) > 0) {
-            message(sprintf("  [跳过] 种子 %d (seed=%d) 已完成 (%d 个结果)",
-                    s, this_seed, length(csv_files)))
+            if (verbose) message(sprintf("  [跳过] 种子 %d (seed=%d) 已完成",
+                    s, this_seed))
             return(this_seed)
         }
 
         dir.create(rdpath, showWarnings = FALSE, recursive = TRUE)
-        message(sprintf("\n>>> 种子 %d/%d (seed=%d) <<<", s, length(seed_pool), this_seed))
-        glidsearch(rdpath, depth_fpath)
+        if (verbose) message(sprintf(">>> 种子 %d/%d (seed=%d)", s, length(seed_pool), this_seed))
+        glidsearch(rdpath, depth_fpath, verbose = verbose)
         parse_glidsearch_results(rdpath, depth_fpath)
+        if (verbose) message(sprintf("  ✓ 种子 %d 完成", s))
         return(this_seed)
     }
 
@@ -552,6 +551,7 @@ main <- function(depth_data_fpath, output_dir, seed = 1:100,
         results <- parallel::mclapply(
             seq_along(seed), run_one_seed,
             seed_pool = seed, depth_fpath = depth_data_fpath, out_dir = output_dir,
+            verbose = FALSE,  # 并行模式静默
             mc.cores = min(n_cores, length(seed))
         )
         elapsed <- difftime(Sys.time(), t0, units = "mins")
@@ -561,7 +561,7 @@ main <- function(depth_data_fpath, output_dir, seed = 1:100,
         t0 <- Sys.time()
         for (i in seq_along(seed)) {
             message(sprintf("\n━━━ 种子 %d/%d (seed=%d) ━━━", i, length(seed), seed[i]))
-            run_one_seed(i, seed, depth_data_fpath, output_dir)
+            run_one_seed(i, seed, depth_data_fpath, output_dir, verbose = TRUE)
             elapsed <- difftime(Sys.time(), t0, units = "mins")
             avg_per_seed <- elapsed / i
             eta <- avg_per_seed * (length(seed) - i)
