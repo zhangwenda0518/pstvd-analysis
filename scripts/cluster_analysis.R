@@ -481,7 +481,7 @@ parse_glidsearch_results <- function(dpath, depth_data) {
         message(sprintf("    验证 F1: %.4f", valid_score))
 
         ff <- plot_umap_(NULL, NULL, NULL, f_umap_data)
-        png(file.path(dpath, 'figures', paste0(prefix, '-full.png')), 1200, 1000, res = 220)
+        png(file.path(dpath, 'figures', paste0(prefix, '-s', valid_score, '-full.png')), 1200, 1000, res = 220)
         suppressMessages(print(ff$fig))
         dev.off()
         write.table(f_umap_data,
