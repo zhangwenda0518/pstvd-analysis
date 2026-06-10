@@ -443,11 +443,17 @@ parse_glidsearch_results <- function(dpath, depth_data_fpath) {
     cls_max <- cls_max[cls_max$n_classes == min(cls_max$n_classes), ]
 
     d <- NULL
-    for (i in 1:nrow(cls_max)) {
-        p <- get_params(cls_max, i)
-        print(unlist(p))
+    for (i in 1:min(nrow(cls_max), 5)) {
+        p <- as.list(cls_max[i, ])
+        message(sprintf("  最优参数 #%d: cv(%d,%d) depth=%d aln=%d nn=%d eps=%.1f mp=%d train-F1=%.3f",
+                i, p$cutoff_viroid_lo, p$cutoff_viroid_up,
+                p$cutoff_depth, p$cutoff_align_len,
+                p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts, p$score))
 
-        fpath_prefix <- paste(as.character(p)[1:8], sep='', collapse='__')
+        prefix <- sprintf("cvlo%d_cvup%d_cd%d_cal%d_nn%d_eps%.1f_mp%d",
+                p$cutoff_viroid_lo, p$cutoff_viroid_up,
+                p$cutoff_depth, p$cutoff_align_len,
+                p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts)
         if (is.null(d)) {
             d <- read_tsv(depth_data_fpath, col_names = TRUE, show_col_types = FALSE, name_repair = "minimal")
         }
@@ -455,8 +461,8 @@ parse_glidsearch_results <- function(dpath, depth_data_fpath) {
                      c(p$cutoff_viroid_lo, p$cutoff_viroid_up), p$cutoff_depth, p$cutoff_align_len,
                      p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts,
                      is.train = TRUE, prior.pca = FALSE, plot_fig = TRUE)
-        png(file.path(dpath, 'figures', paste0(fpath_prefix, '-train.png')), 1200, 1000, res = 220)
-        print(f$umap)
+        png(file.path(dpath, 'figures', paste0(prefix, '-train.png')), 1200, 1000, res = 220)
+        suppressMessages(print(f$umap))
         dev.off()
 
         # figure with all labeled viroids
@@ -467,18 +473,15 @@ parse_glidsearch_results <- function(dpath, depth_data_fpath) {
 
         is.valid <- (f_umap_data$train_label == 'unknown')
         valid_score <- calc_f1_score(as.character(f_umap_data$type[is.valid]), f_umap_data$pred_label[is.valid])
-
-        print(valid_score)
+        message(sprintf("    验证 F1: %.4f", valid_score))
 
         ff <- plot_umap_(NULL, NULL, NULL, f_umap_data)
-        png(file.path(dpath, 'figures', paste0(fpath_prefix, '-s', valid_score, '-full.png')), 1200, 1000, res = 220)
-        print(ff$fig)
+        png(file.path(dpath, 'figures', paste0(prefix, '-full.png')), 1200, 1000, res = 220)
+        suppressMessages(print(ff$fig))
         dev.off()
         write.table(f_umap_data,
-                    file = file.path(dpath, 'figures', paste0(fpath_prefix, '-data.csv')),
+                    file = file.path(dpath, 'figures', paste0(prefix, '-data.csv')),
                     col.names = TRUE, row.names = FALSE, sep = '\t', quote = FALSE)
-
-        print('---')
     }
 
 }
