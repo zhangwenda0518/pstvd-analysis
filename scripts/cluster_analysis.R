@@ -376,7 +376,7 @@ umap_cv <- function(d,
 
 
 
-glidsearch <- function(output_dpath, depth_data_fpath, prior.pca = FALSE, verbose = TRUE) {
+glidsearch <- function(output_dpath, depth_data, prior.pca = FALSE, verbose = TRUE) {
     class_eval_stats <- NULL
 
     CUTOFF_VIROIDS <- rbind(c(0, 400), c(0, 300), c(0, 280), c(0, 260),
@@ -387,8 +387,12 @@ glidsearch <- function(output_dpath, depth_data_fpath, prior.pca = FALSE, verbos
 
     cls_data <- NULL
 
-    # load alignment results
-    d <- read_tsv(depth_data_fpath, col_names = TRUE, show_col_types = FALSE, name_repair = "minimal")
+    # 支持文件路径或预加载 data.frame
+    if (is.character(depth_data)) {
+        d <- read_tsv(depth_data, col_names = TRUE, show_col_types = FALSE, name_repair = "minimal")
+    } else {
+        d <- depth_data
+    }
 
     n_processes <- nrow(CUTOFF_VIROIDS) * length(CUTOFF_DEPTH) * length(CUTOFF_ALNLEN)
     n_processed <- 0
@@ -423,10 +427,7 @@ glidsearch <- function(output_dpath, depth_data_fpath, prior.pca = FALSE, verbos
 
 
 
-parse_glidsearch_results <- function(dpath, depth_data_fpath) {
-    if (!dir.exists(file.path(dpath, 'figures'))) {
-        dir.create(file.path(dpath, 'figures'))
-    }
+parse_glidsearch_results <- function(dpath, depth_data) {
     if (!dir.exists(file.path(dpath, 'figures'))) {
         dir.create(file.path(dpath, 'figures'))
     }
@@ -455,7 +456,11 @@ parse_glidsearch_results <- function(dpath, depth_data_fpath) {
                 p$cutoff_depth, p$cutoff_align_len,
                 p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts)
         if (is.null(d)) {
-            d <- read_tsv(depth_data_fpath, col_names = TRUE, show_col_types = FALSE, name_repair = "minimal")
+            if (is.character(depth_data)) {
+                d <- read_tsv(depth_data, col_names = TRUE, show_col_types = FALSE, name_repair = "minimal")
+            } else {
+                d <- depth_data
+            }
         }
         f <- umap_cv(d,
                      c(p$cutoff_viroid_lo, p$cutoff_viroid_up), p$cutoff_depth, p$cutoff_align_len,
@@ -529,13 +534,19 @@ main <- function(depth_data_fpath, output_dir, seed = 1:100,
 
     dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
+    # 预加载深度矩阵（一次读取，fork 共享）
+    message("预加载深度矩阵...")
+    depth_preloaded <- read_tsv(depth_data_fpath, col_names = TRUE,
+                                show_col_types = FALSE, name_repair = "minimal")
+    message(sprintf("  维度: %d x %d", nrow(depth_preloaded), ncol(depth_preloaded)))
+
     # ---- 每个种子独立运行的工作函数 ----
-    run_one_seed <- function(s, seed_pool, depth_fpath, out_dir, verbose) {
+    run_one_seed <- function(s, seed_pool, depth_data, out_dir, verbose) {
         this_seed <- seed_pool[s]
         RAND_SEED <<- this_seed
         rdpath <- file.path(out_dir, paste0('umap_seed', this_seed))
 
-        # 断点续传：已完成（有 figures/*-data.csv）则跳过
+        # 断点续传
         csv_files <- list.files(file.path(rdpath, 'figures'),
                                 pattern = '-data\\.csv$', full.names = FALSE)
         if (length(csv_files) > 0) {
@@ -546,21 +557,23 @@ main <- function(depth_data_fpath, output_dir, seed = 1:100,
 
         dir.create(rdpath, showWarnings = FALSE, recursive = TRUE)
         if (verbose) message(sprintf(">>> 种子 %d/%d (seed=%d)", s, length(seed_pool), this_seed))
-        glidsearch(rdpath, depth_fpath, verbose = verbose)
-        parse_glidsearch_results(rdpath, depth_fpath)
+        glidsearch(rdpath, depth_data, verbose = verbose)
+        parse_glidsearch_results(rdpath, depth_data)
         if (verbose) message(sprintf("  ✓ 种子 %d 完成", s))
         return(this_seed)
     }
 
     n_cores <- if (exists("N_CORES")) N_CORES else 1
-    if (.Platform$OS.type == "unix" && n_cores > 1 && length(seed) > 1) {
-        message(sprintf("并行模式: %d 核心, %d 种子", n_cores, length(seed)))
+    safe_cores <- min(n_cores, length(seed), 32)  # 最多 32 核，避免内存争抢
+    if (.Platform$OS.type == "unix" && safe_cores > 1 && length(seed) > 1) {
+        message(sprintf("并行模式: %d 核心 (上限32), %d 种子", safe_cores, length(seed)))
         t0 <- Sys.time()
         results <- parallel::mclapply(
             seq_along(seed), run_one_seed,
-            seed_pool = seed, depth_fpath = depth_data_fpath, out_dir = output_dir,
+            seed_pool = seed, depth_data = depth_preloaded, out_dir = output_dir,
             verbose = TRUE,
-            mc.cores = min(n_cores, length(seed))
+            mc.cores = safe_cores,
+            mc.preschedule = TRUE
         )
         elapsed <- difftime(Sys.time(), t0, units = "mins")
         message(sprintf("并行聚类完成: %d seeds / %d cores / %.1f min",
@@ -569,7 +582,7 @@ main <- function(depth_data_fpath, output_dir, seed = 1:100,
         t0 <- Sys.time()
         for (i in seq_along(seed)) {
             message(sprintf("\n━━━ 种子 %d/%d (seed=%d) ━━━", i, length(seed), seed[i]))
-            run_one_seed(i, seed, depth_data_fpath, output_dir, verbose = TRUE)
+            run_one_seed(i, seed, depth_preloaded, output_dir, verbose = TRUE)
             elapsed <- difftime(Sys.time(), t0, units = "mins")
             avg_per_seed <- elapsed / i
             eta <- avg_per_seed * (length(seed) - i)
