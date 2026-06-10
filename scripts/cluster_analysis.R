@@ -411,8 +411,10 @@ glidsearch <- function(output_dpath, depth_data, prior.pca = FALSE, verbose = TR
                                   cls_data_))
         }
 
-        write.table(cls_data, file = paste0(output_dpath, '/clustering_summary.tsv'),
-                    sep = '\t', quote = FALSE, row.names = FALSE, col.names = TRUE)
+        if (!is.null(cls_data)) {
+            write.table(cls_data, file = paste0(output_dpath, '/clustering_summary.tsv'),
+                        sep = '\t', quote = FALSE, row.names = FALSE, col.names = TRUE)
+        }
 
         n_processed <- n_processed + 1
         pct <- floor(n_processed / n_processes * 100)
@@ -434,8 +436,15 @@ parse_glidsearch_results <- function(dpath, depth_data) {
 
     get_params <- function(d, i) {as.list(d[i,])}
 
-    cls <- read.table(paste0(dpath, '/clustering_summary.tsv'), header = TRUE, sep = '\t')
+    summary_path <- paste0(dpath, '/clustering_summary.tsv')
+    if (!file.exists(summary_path) || file.info(summary_path)$size == 0) {
+        message("  [跳过] 无聚类结果 (clustering_summary.tsv 为空)")
+        return(invisible())
+    }
+    cls <- read.table(summary_path, header = TRUE, sep = '\t')
+    if (nrow(cls) == 0) return(invisible())
     cls <- cls[cls$n_outliers < 10 & cls$n_classes <= 10, ]
+    if (nrow(cls) == 0) return(invisible())
     cls <- cls[order(- cls$score, cls$n_classes), ]  # fix: 原为 n_class
 
     cls_090 <- cls[cls$score > 0.90, ]
