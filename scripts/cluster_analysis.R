@@ -557,10 +557,20 @@ main <- function(depth_data_fpath, output_dir, seed = 1:100,
 
         dir.create(rdpath, showWarnings = FALSE, recursive = TRUE)
         if (verbose) message(sprintf(">>> 种子 %d/%d (seed=%d)", s, length(seed_pool), this_seed))
-        glidsearch(rdpath, depth_data, verbose = verbose)
-        parse_glidsearch_results(rdpath, depth_data)
-        if (verbose) message(sprintf("  ✓ 种子 %d 完成", s))
-        return(this_seed)
+
+        result <- tryCatch({
+            glidsearch(rdpath, depth_data, verbose = verbose)
+            parse_glidsearch_results(rdpath, depth_data)
+            if (verbose) message(sprintf("  ✓ 种子 %d 完成", s))
+            this_seed
+        }, error = function(e) {
+            # 错误写入日志文件
+            err_msg <- sprintf("[ERROR] 种子 %d (seed=%d): %s", s, this_seed, e$message)
+            write(err_msg, file = file.path(rdpath, "error.log"))
+            if (verbose) message(sprintf("  ✗ 种子 %d 失败: %s", s, e$message))
+            return(NA)
+        })
+        return(result)
     }
 
     n_cores <- if (exists("N_CORES")) N_CORES else 1
@@ -588,6 +598,16 @@ main <- function(depth_data_fpath, output_dir, seed = 1:100,
             eta <- avg_per_seed * (length(seed) - i)
             message(sprintf("  ✓ 种子 %d 完成 | 耗时: %.1f min | 预计剩余: %.1f min",
                     i, elapsed, eta))
+        }
+    }
+
+    # 检查崩溃的种子
+    error_files <- list.files(output_dir, pattern = "error\\.log$",
+                              recursive = TRUE, full.names = TRUE)
+    if (length(error_files) > 0) {
+        message(sprintf("\n⚠ %d 个种子崩溃, 错误详情:", length(error_files)))
+        for (ef in error_files) {
+            message(sprintf("  %s: %s", dirname(dirname(ef)), readLines(ef, warn = FALSE)))
         }
     }
 
