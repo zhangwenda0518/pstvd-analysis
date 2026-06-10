@@ -475,6 +475,10 @@ parse_glidsearch_results <- function(dpath, depth_data) {
                      c(p$cutoff_viroid_lo, p$cutoff_viroid_up), p$cutoff_depth, p$cutoff_align_len,
                      p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts,
                      is.train = TRUE, prior.pca = FALSE, plot_fig = TRUE)
+        if (is.null(f) || is.null(f$umap) || is.null(f$umap_data)) {
+            message("    参数重跑失败, umap_cv 返回空")
+            next
+        }
         png(file.path(dpath, 'figures', paste0(prefix, '-train.png')), 1200, 1000, res = 220)
         suppressMessages(print(f$umap))
         dev.off()
@@ -573,9 +577,14 @@ main <- function(depth_data_fpath, output_dir, seed = 1:100,
             if (verbose) message(sprintf("  ✓ 种子 %d 完成", s))
             this_seed
         }, error = function(e) {
-            # 错误写入日志文件
-            err_msg <- sprintf("[ERROR] 种子 %d (seed=%d): %s", s, this_seed, e$message)
-            write(err_msg, file = file.path(rdpath, "error.log"))
+            # 完整错误栈写入日志
+            err_lines <- c(
+                sprintf("[ERROR] 种子 %d (seed=%d)", s, this_seed),
+                sprintf("  message: %s", e$message),
+                "  call stack:",
+                capture.output(traceback(5))
+            )
+            writeLines(err_lines, file.path(rdpath, "error.log"))
             if (verbose) message(sprintf("  ✗ 种子 %d 失败: %s", s, e$message))
             return(NA)
         })
