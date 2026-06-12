@@ -443,9 +443,16 @@ parse_glidsearch_results <- function(dpath, depth_data) {
     }
     cls <- read.table(summary_path, header = TRUE, sep = '\t')
     if (nrow(cls) == 0) return(invisible())
-    cls <- cls[cls$n_outliers < 10 & cls$n_classes <= 10, ]
+
+    # 严格过滤
+    cls_strict <- cls[cls$n_outliers < 10 & cls$n_classes <= 10, ]
+    # 如果严格过滤后为空，放宽过滤取最优 score
+    if (nrow(cls_strict) == 0) {
+        message("  ⚠ 无参数通过严格过滤 (n_outliers<10, n_classes≤10)，放宽过滤")
+        cls_strict <- cls[order(-cls$score), ]  # 直接用 score 排序
+    }
+    cls <- cls_strict[order(-cls_strict$score, cls_strict$n_classes), ]
     if (nrow(cls) == 0) return(invisible())
-    cls <- cls[order(- cls$score, cls$n_classes), ]  # fix: 原为 n_class
 
     cls_090 <- cls[cls$score > 0.90, ]
 
