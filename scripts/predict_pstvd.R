@@ -1,0 +1,415 @@
+#!/usr/bin/env Rscript
+#
+# predict_pstvd.R — PSTVd 致病性预测 (筛选+预测一体化)
+#
+# 一步完成: 序列比对筛选 → 深度矩阵生成 → 聚类预测 → 综合报告
+#
+# 用法:
+#   Rscript predict_pstvd.R <new_sequences.fasta> \
+#       <pstvd_db.fasta> <metadata.tsv> \
+#       <existing_depth.tsv.gz> <best_params.tsv> \
+#       <genome_fa> <bt2_index_prefix> <output_dir> \
+#       [identity_threshold] [n_seeds] [n_cores] [threads]
+#
+# 依赖:
+#   R:  tidyverse, Biostrings, umap, dbscan
+#   系统: bowtie2, samtools, pysamstats, python3
+
+suppressPackageStartupMessages({
+    library(tidyverse)
+    library(Biostrings)
+    library(umap)
+    library(dbscan)
+})
+
+# =============================================================================
+# 参数
+# =============================================================================
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 9) {
+    stop("用法: Rscript predict_pstvd.R <new.fa> <pstvd_db.fa> <metadata.tsv>
+         <existing_depth.tsv.gz> <best_params.tsv> <genome.fa>
+         <bt2_index> <output_dir> [identity_thr] [n_seeds] [n_cores] [threads]")
+}
+
+new_fasta        <- args[1]
+pstvd_db         <- args[2]
+metadata_tsv     <- args[3]
+existing_depth   <- args[4]
+best_params_file <- args[5]
+genome_fa        <- args[6]
+bt2_index        <- args[7]
+output_dir       <- args[8]
+identity_thr     <- if (length(args) >= 9)  as.numeric(args[9])  else 100.0
+n_seeds          <- if (length(args) >= 10) as.integer(args[10]) else 20
+n_cores          <- if (length(args) >= 11) as.integer(args[11]) else 1
+threads          <- if (length(args) >= 12) as.integer(args[12]) else 32
+
+scripts_dir <- dirname(normalizePath(sys.frame(1)$ofile))
+if (is.na(scripts_dir)) scripts_dir <- "scripts"
+
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+# =============================================================================
+# Phase 1: 序列筛选
+# =============================================================================
+cat("\n")
+message("╔══════════════════════════════════════╗")
+message("║  Phase 1: 序列筛选                  ║")
+message("╚══════════════════════════════════════╝")
+
+db_seqs <- readDNAStringSet(pstvd_db)
+message(sprintf("  已知序列: %d", length(db_seqs)))
+db_ids <- sapply(strsplit(names(db_seqs), " "), `[`, 1)
+
+meta <- read.table(metadata_tsv, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+db_labels <- rep("unknown", length(db_seqs))
+for (i in seq_along(db_ids)) {
+    m <- meta$symptom[meta$isolate == db_ids[i]]
+    if (length(m) > 0) { db_labels[i] <- m[1]; next }
+    m <- meta$symptom[meta$isolate == sub("\\..*", "", db_ids[i])]
+    if (length(m) > 0) db_labels[i] <- m[1]
+}
+message(sprintf("  有标签: %d / %d", sum(db_labels != "unknown"), length(db_seqs)))
+
+new_seqs <- readDNAStringSet(new_fasta)
+message(sprintf("  新序列: %d", length(new_seqs)))
+
+screen_results <- data.frame(
+    query_id   = names(new_seqs),
+    best_match = NA_character_,
+    identity   = NA_real_,
+    match_label = NA_character_,
+    decision   = NA_character_,
+    stringsAsFactors = FALSE
+)
+
+pb <- txtProgressBar(min = 0, max = length(new_seqs), style = 3)
+for (i in seq_along(new_seqs)) {
+    query <- new_seqs[[i]]
+    scores <- rep(NA_real_, length(db_seqs))
+    for (j in seq_along(db_seqs)) {
+        aln <- try(pairwiseAlignment(db_seqs[[j]], query, type = "global"), silent = TRUE)
+        if (!inherits(aln, "try-error")) scores[j] <- pid(aln, type = "PID1")
+    }
+    best_idx <- which.max(scores)
+    screen_results$best_match[i]  <- db_ids[best_idx]
+    screen_results$identity[i]    <- round(scores[best_idx], 1)
+    screen_results$match_label[i] <- db_labels[best_idx]
+
+    if (!is.na(scores[best_idx]) && scores[best_idx] >= identity_thr) {
+        screen_results$decision[i] <- if (db_labels[best_idx] != "unknown")
+            paste0("inherit_", db_labels[best_idx]) else "inherit_unknown"
+    } else {
+        screen_results$decision[i] <- "need_prediction"
+    }
+    setTxtProgressBar(pb, i)
+}
+close(pb)
+
+level1 <- screen_results[grepl("inherit", screen_results$decision), ]
+level2 <- screen_results[screen_results$decision == "need_prediction", ]
+
+message(sprintf("  Level 1 (直接继承): %d", nrow(level1)))
+message(sprintf("  Level 2 (需要预测): %d", nrow(level2)))
+
+write.csv(screen_results, file.path(output_dir, "screening_results.csv"), row.names = FALSE)
+
+# =============================================================================
+# Phase 2: 生成深度矩阵 (仅 Level 2)
+# =============================================================================
+if (nrow(level2) == 0) {
+    message("\n  全部直接继承, 跳过预测。")
+} else {
+    cat("\n")
+    message("╔══════════════════════════════════════╗")
+    message("║  Phase 2: 生成深度矩阵              ║")
+    message("╚══════════════════════════════════════╝")
+
+    iso_dir   <- file.path(output_dir, "isolates")
+    fastq_dir <- file.path(output_dir, "fastq")
+    bam_dir   <- file.path(output_dir, "bam")
+    depth_dir <- file.path(output_dir, "depth")
+    for (d in c(iso_dir, fastq_dir, bam_dir, depth_dir)) dir.create(d, showWarnings = FALSE)
+
+    # 提取 Level 2 序列
+    level2_fa <- file.path(output_dir, "level2.fasta")
+    level2_idx <- which(screen_results$decision == "need_prediction")
+    writeXStringSet(new_seqs[level2_idx], level2_fa)
+
+    # 拆分
+    current_fh <- NULL
+    con <- file(level2_fa, "r")
+    while (length(line <- readLines(con, 1)) > 0) {
+        if (startsWith(line, ">")) {
+            if (!is.null(current_fh)) close(current_fh)
+            sid <- gsub("[ /\\\\]", "_", substr(line, 2, nchar(line)))
+            current_fh <- file(file.path(iso_dir, paste0(sid, ".fa")), "w")
+        }
+        if (!is.null(current_fh)) writeLines(line, current_fh)
+    }
+    close(con)
+    if (!is.null(current_fh)) close(current_fh)
+
+    fa_files <- list.files(iso_dir, pattern = "\\.fa$", full.names = TRUE)
+    message(sprintf("  生成 FASTQ + 比对 + 深度 (%d 条)", length(fa_files)))
+
+    for (fa in fa_files) {
+        sid <- tools::file_path_sans_ext(basename(fa))
+
+        # FASTQ
+        fq_path <- file.path(fastq_dir, paste0(sid, ".fastq.gz"))
+        if (!file.exists(fq_path)) {
+            for (rlen in c(21, 22, 23, 24)) {
+                tmp <- file.path(fastq_dir, paste0(sid, "_L", rlen, ".fastq"))
+                system2("python3", c(
+                    file.path(scripts_dir, "generate_fastq.py"),
+                    fa, tmp, rlen, "FIXED"
+                ), stdout = FALSE, stderr = FALSE)
+            }
+            # 合并
+            merged_fq <- file.path(fastq_dir, paste0(sid, ".fastq"))
+            system(paste("cat", paste0(file.path(fastq_dir, paste0(sid, "_L", 21:24, ".fastq")), collapse = " "),
+                        ">", shQuote(merged_fq)))
+            system2("gzip", c("-f", merged_fq))
+            file.remove(list.files(fastq_dir, pattern = paste0(sid, "_L"), full.names = TRUE))
+        }
+
+        # Bowtie2
+        bam_path <- file.path(bam_dir, paste0(sid, ".bam"))
+        if (!file.exists(bam_path)) {
+            sam_path <- file.path(bam_dir, paste0(sid, ".sam"))
+            system2("bowtie2", c("-N", "1", "-L", "16", "-p", threads,
+                                "-x", bt2_index, "-U", fq_path, "-S", sam_path),
+                    stdout = FALSE, stderr = FALSE)
+            system2("samtools", c("sort", "-@", threads, sam_path, "-o", bam_path))
+            file.remove(sam_path)
+            system2("samtools", c("index", bam_path))
+        }
+
+        # 深度
+        depth_path <- file.path(depth_dir, paste0(sid, ".depth.gz"))
+        if (!file.exists(depth_path)) {
+            depth_raw <- file.path(depth_dir, paste0(sid, ".depth"))
+            system2("pysamstats", c("--type", "coverage", bam_path),
+                    stdout = depth_raw, stderr = FALSE)
+            system2("gzip", c("-f", depth_raw))
+        }
+
+        message(sprintf("    ✓ %s", sid))
+    }
+
+    # 汇总深度矩阵
+    message("  汇总深度矩阵...")
+    new_depth_tsv <- file.path(output_dir, "new_depth.tsv")
+    system2("python3", c(
+        file.path(scripts_dir, "summarize_coverage.py"),
+        depth_dir, metadata_tsv, genome_fa, new_depth_tsv
+    ), stdout = FALSE, stderr = FALSE)
+
+    # =========================================================================
+    # Phase 3: 预测
+    # =========================================================================
+    cat("\n")
+    message("╔══════════════════════════════════════╗")
+    message("║  Phase 3: 致病性预测                ║")
+    message("╚══════════════════════════════════════╝")
+
+    # 加载最优参数
+    best <- read.table(best_params_file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+    best <- best[best$n_outliers < 10 & best$n_classes <= 10, ]
+    if (nrow(best) == 0) {
+        best <- read.table(best_params_file, header = TRUE, sep = "\t")
+        best <- best[order(-best$score), ]
+    }
+    best <- best[order(-best$score, best$n_classes), ]
+    p <- as.list(best[1, ])
+
+    message(sprintf("  最优参数: cv(%d,%d) depth=%d aln=%d nn=%d eps=%.1f mp=%d",
+            p$cutoff_viroid_lo, p$cutoff_viroid_up,
+            p$cutoff_depth, p$cutoff_align_len,
+            p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts))
+
+    # 加载 + 合并深度矩阵
+    existing <- read_tsv(existing_depth, col_names = TRUE, show_col_types = FALSE, name_repair = "minimal")
+    newdata  <- read_tsv(paste0(new_depth_tsv, ".gz"), col_names = TRUE,
+                         show_col_types = FALSE, name_repair = "minimal")
+
+    if (!"region_id" %in% colnames(existing)) existing$region_id <- existing[[1]]
+    if (!"region_id" %in% colnames(newdata))  newdata$region_id  <- newdata[[1]]
+    new_ids <- setdiff(colnames(newdata), c("region_id", colnames(existing)[1]))
+
+    merged <- existing %>%
+        select(region_id, everything()) %>%
+        full_join(newdata %>% select(region_id, all_of(new_ids)), by = "region_id")
+    merged[is.na(merged)] <- 0
+    rownames(merged) <- merged$region_id
+    merged$region_id <- NULL
+
+    # 预处理
+    region_parts <- str_split(rownames(merged), ':', simplify = TRUE)
+    if (ncol(region_parts) >= 2) {
+        coords <- str_split(region_parts[, 2], '-', simplify = TRUE)
+        lens <- as.integer(coords[, 2]) - as.integer(coords[, 1]) + 1
+    } else {
+        lens <- rep(p$cutoff_align_len + 1, nrow(merged))
+    }
+    merged <- merged[lens > p$cutoff_align_len, , drop = FALSE]
+    merged$region_id <- rownames(merged)
+    merged_agg <- merged %>% group_by(region_id) %>% summarise_all(sum) %>% as.data.frame()
+    rownames(merged_agg) <- merged_agg$region_id
+    merged_agg$region_id <- NULL
+    merged_mat <- as.matrix(merged_agg)
+
+    keep <- (p$cutoff_viroid_lo < rowSums(merged_mat > 0)) &
+            (rowSums(merged_mat > 0) < p$cutoff_viroid_up)
+    merged_mat <- merged_mat[keep, , drop = FALSE]
+    merged_mat[merged_mat <= p$cutoff_depth] <- 0
+    merged_mat[merged_mat > p$cutoff_depth]  <- 1
+    merged_mat <- merged_mat[rowSums(merged_mat) > 0, , drop = FALSE]
+    merged_mat <- merged_mat[rowSums(merged_mat) < ncol(merged_mat), , drop = FALSE]
+    merged_mat <- unique(merged_mat)
+
+    message(sprintf("  过滤后: %d x %d", nrow(merged_mat), ncol(merged_mat)))
+
+    # 症状标签
+    viroid_names <- colnames(merged_mat)
+    true_labels <- rep('unknown', length(viroid_names))
+    true_labels[viroid_names %in% meta$isolate[meta$symptom == "mild"]]     <- 'mild'
+    true_labels[viroid_names %in% meta$isolate[meta$symptom == "moderate"]] <- 'moderate'
+    true_labels[viroid_names %in% meta$isolate[meta$symptom == "severe"]]   <- 'severe'
+
+    # 多次种子预测
+    estimate_label <- function(tl, pc) {
+        pl <- rep('', length(pc))
+        tl[tl == 'moderate'] <- 'unknown'
+        for (ci in sort(unique(pc))) {
+            if (ci == 0) { pl[pc == ci] <- 'outliers'; next }
+            tb <- table(tl[pc == ci])
+            tb <- tb[!(names(tb) %in% c('moderate', 'unknown'))]
+            pl[pc == ci] <- if (sum(tb) == 0) 'unknown' else names(tb)[which.max(tb)]
+        }
+        pl
+    }
+
+    run_seed <- function(s) {
+        set.seed(202020 + s)
+        cfg <- umap.defaults
+        cfg$n_neighbors  <- p$umap__n_neighbor
+        cfg$n_epochs     <- 100
+        cfg$random_state <- 202020 + s
+        res <- try(umap(t(merged_mat), config = cfg))
+        if (inherits(res, 'try-error')) return(rep(NA, ncol(merged_mat)))
+        db <- dbscan(res$layout, eps = p$dbscan__eps, minPts = p$dbscan__minpts)
+        estimate_label(true_labels, db$cluster)
+    }
+
+    if (.Platform$OS.type == "unix" && n_cores > 1) {
+        pred_list <- parallel::mclapply(seq_len(n_seeds), run_seed, mc.cores = min(n_cores, n_seeds))
+        all_preds <- do.call(cbind, pred_list)
+    } else {
+        all_preds <- matrix(NA, nrow = length(viroid_names), ncol = n_seeds)
+        for (s in seq_len(n_seeds)) all_preds[, s] <- run_seed(s)
+    }
+    rownames(all_preds) <- viroid_names
+
+    # 汇总 Level 2 结果
+    pred_output <- data.frame(stringsAsFactors = FALSE)
+    for (vid in new_ids) {
+        idx <- which(viroid_names == vid)
+        if (length(idx) == 0) next
+        preds <- all_preds[idx, ]
+        preds <- preds[!is.na(preds)]
+        n_v <- length(preds)
+        if (n_v == 0) next
+        mv <- sum(preds == 'mild')
+        sv <- sum(preds == 'severe')
+        consensus <- if (mv > sv) 'mild' else if (sv > mv) 'severe' else 'uncertain'
+        pred_output <- rbind(pred_output, data.frame(
+            isolate = vid, predicted = consensus,
+            confidence = max(mv, sv) / n_v,
+            mild_votes = mv, severe_votes = sv, n_valid = n_v,
+            stringsAsFactors = FALSE
+        ))
+    }
+
+    if (nrow(pred_output) > 0) {
+        cat("\n  Level 2 预测结果:\n")
+        for (i in seq_len(nrow(pred_output))) {
+            row <- pred_output[i, ]
+            cat(sprintf("    %-30s → %-8s (置信度 %.0f%%, mild:%d severe:%d)\n",
+                    row$isolate, row$predicted, row$confidence * 100,
+                    row$mild_votes, row$severe_votes))
+        }
+        write.csv(pred_output, file.path(output_dir, "level2_predictions.csv"), row.names = FALSE)
+    }
+}
+
+# =============================================================================
+# Phase 4: 综合报告
+# =============================================================================
+cat("\n")
+message("╔══════════════════════════════════════╗")
+message("║  Phase 4: 综合报告                  ║")
+message("╚══════════════════════════════════════╝")
+
+report_path <- file.path(output_dir, "final_report.txt")
+sink(report_path)
+
+cat("========================================================\n")
+cat("  PSTVd 致病性预测 — 综合报告\n")
+cat("========================================================\n\n")
+cat(sprintf("输入序列 : %d\n", nrow(screen_results)))
+cat(sprintf("一致性阈值: %.0f%%\n", identity_thr))
+cat(sprintf("生成时间 : %s\n\n", Sys.time()))
+
+cat("--------------------------------------------------------\n")
+cat("Level 1 — 直接继承 (≥", identity_thr, "% 一致)\n", sep = "")
+cat("--------------------------------------------------------\n")
+cat(sprintf("  总计: %d\n", nrow(level1)))
+if (nrow(level1) > 0) {
+    for (i in seq_len(nrow(level1))) {
+        r <- level1[i, ]
+        cat(sprintf("  %-30s %.1f%% → %s (%s)\n", r$query_id, r$identity, r$match_label, r$best_match))
+    }
+}
+
+cat("\n--------------------------------------------------------\n")
+cat("Level 2 — 预测结果\n")
+cat("--------------------------------------------------------\n")
+if (exists("pred_output") && nrow(pred_output) > 0) {
+    cat(sprintf("  总计: %d\n", nrow(pred_output)))
+    for (i in seq_len(nrow(pred_output))) {
+        r <- pred_output[i, ]
+        cat(sprintf("  %-30s → %-8s (置信度 %.0f%%, mild:%d severe:%d/%d)\n",
+                r$isolate, r$predicted, r$confidence * 100,
+                r$mild_votes, r$severe_votes, r$n_valid))
+    }
+} else {
+    cat("  无\n")
+}
+
+cat("\n--------------------------------------------------------\n")
+cat("汇总\n")
+cat("--------------------------------------------------------\n")
+n_inherit_mild <- sum(screen_results$decision == "inherit_mild")
+n_inherit_mod  <- sum(screen_results$decision == "inherit_moderate")
+n_inherit_sev  <- sum(screen_results$decision == "inherit_severe")
+n_inherit_unk  <- sum(screen_results$decision == "inherit_unknown")
+n_pred <- sum(screen_results$decision == "need_prediction")
+
+cat(sprintf("  mild     (继承): %d\n", n_inherit_mild))
+cat(sprintf("  moderate (继承): %d\n", n_inherit_mod))
+cat(sprintf("  severe   (继承): %d\n", n_inherit_sev))
+cat(sprintf("  unknown  (继承): %d\n", n_inherit_unk))
+cat(sprintf("  预测            : %d\n", n_pred))
+cat(sprintf("  ─────────────────\n"))
+cat(sprintf("  合计            : %d\n", nrow(screen_results)))
+
+sink()
+
+message(sprintf("\n报告: %s", report_path))
+message(sprintf("详情: %s/screening_results.csv", output_dir))
+if (exists("pred_output") && nrow(pred_output) > 0) {
+    message(sprintf("预测: %s/level2_predictions.csv", output_dir))
+}
