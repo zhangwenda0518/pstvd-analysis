@@ -9,7 +9,7 @@
 #
 # 用法:
 #   Rscript predict_new.R <existing_depth.tsv.gz> <new_depth.tsv.gz> \
-#       <best_params.tsv> <output_dir> [n_seeds] [acn] [metadata]
+#       <best_params.tsv> <output_dir> [n_seeds] [acn] [metadata] [n_cores]
 #
 # 输出:
 #   prediction_results.csv — 每个新序列的预测症状和置信度
@@ -27,7 +27,7 @@ suppressPackageStartupMessages({
 # =============================================================================
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 4) {
-    stop("用法: Rscript predict_new.R <existing_depth.tsv.gz> <new_depth.tsv.gz> <best_params.tsv> <output_dir> [n_seeds] [acn] [metadata]")
+    stop("用法: Rscript predict_new.R <existing_depth.tsv.gz> <new_depth.tsv.gz> <best_params.tsv> <output_dir> [n_seeds] [acn] [metadata] [n_cores]")
 }
 
 existing_file    <- args[1]
@@ -37,6 +37,7 @@ output_dir       <- args[4]
 n_seeds          <- if (length(args) >= 5) as.integer(args[5]) else 20
 acn_file         <- if (length(args) >= 6) args[6] else NULL
 metadata_file    <- if (length(args) >= 7) args[7] else NULL
+N_CORES          <- if (length(args) >= 8) as.integer(args[8]) else 1
 
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
@@ -167,23 +168,38 @@ true_labels[viroid_names %in% V_MILD]     <- 'mild'
 true_labels[viroid_names %in% V_MODERATE] <- 'moderate'
 true_labels[viroid_names %in% V_SEVERE]   <- 'severe'
 
-# 多次运行
-all_predictions <- matrix(NA, nrow = length(viroid_names), ncol = n_seeds)
-rownames(all_predictions) <- viroid_names
-
-for (s in seq_len(n_seeds)) {
+# 多次运行 (并行可选)
+run_one_seed <- function(s, mat, true_labs, umap_nn, dbscan_eps, dbscan_mp) {
     set.seed(202020 + s)
     umap_cfg <- umap.defaults
-    umap_cfg$n_neighbors  <- p$umap__n_neighbor
+    umap_cfg$n_neighbors  <- umap_nn
     umap_cfg$n_epochs     <- 100
     umap_cfg$random_state <- 202020 + s
 
-    umap_res <- try(umap(t(merged_mat), config = umap_cfg))
-    if (inherits(umap_res, 'try-error')) next
-
-    db_res <- dbscan(umap_res$layout, eps = p$dbscan__eps, minPts = p$dbscan__minpts)
-    all_predictions[, s] <- estimate_symptom_label(true_labels, db_res$cluster)
+    umap_res <- try(umap(t(mat), config = umap_cfg))
+    if (inherits(umap_res, 'try-error')) return(rep(NA, ncol(mat)))
+    db_res <- dbscan(umap_res$layout, eps = dbscan_eps, minPts = dbscan_mp)
+    estimate_symptom_label(true_labs, db_res$cluster)
 }
+
+n_cores <- if (exists("N_CORES")) N_CORES else 1
+if (.Platform$OS.type == "unix" && n_cores > 1 && n_seeds > 1) {
+    message(sprintf("  并行模式: %d 核心", min(n_cores, n_seeds)))
+    pred_list <- parallel::mclapply(
+        seq_len(n_seeds), run_one_seed,
+        mat = merged_mat, true_labs = true_labels,
+        umap_nn = p$umap__n_neighbor, dbscan_eps = p$dbscan__eps, dbscan_mp = p$dbscan__minpts,
+        mc.cores = min(n_cores, n_seeds)
+    )
+    all_predictions <- do.call(cbind, pred_list)
+} else {
+    all_predictions <- matrix(NA, nrow = length(viroid_names), ncol = n_seeds)
+    for (s in seq_len(n_seeds)) {
+        all_predictions[, s] <- run_one_seed(s, merged_mat, true_labels,
+                                              p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts)
+    }
+}
+rownames(all_predictions) <- viroid_names
 
 # =============================================================================
 # 6. 汇总新序列的预测
