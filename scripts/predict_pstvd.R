@@ -7,9 +7,14 @@
 # 用法:
 #   Rscript predict_pstvd.R <new_sequences.fasta> \
 #       <pstvd_db.fasta> <metadata.tsv> \
-#       <existing_depth.tsv.gz> <best_params.tsv> \
+#       <existing_depth.tsv.gz> <clustering_results_dir> \
 #       <genome_fa> <bt2_index_prefix> <output_dir> \
-#       [identity_threshold] [n_seeds] [n_cores] [threads]
+#       [identity_threshold] [n_seeds] [n_cores] [threads] [consensus_seeds]
+#
+# 参数:
+#   clustering_results_dir : Stage 6 输出目录, 含 umap_seed1-100/
+#                          (自动取多个种子的 consensus 最优参数)
+#   consensus_seeds        : 取几个种子做 consensus (默认 20)
 #
 # 依赖:
 #   R:  tidyverse, Biostrings, umap, dbscan
@@ -28,15 +33,15 @@ suppressPackageStartupMessages({
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 9) {
     stop("用法: Rscript predict_pstvd.R <new.fa> <pstvd_db.fa> <metadata.tsv>
-         <existing_depth.tsv.gz> <best_params.tsv> <genome.fa>
-         <bt2_index> <output_dir> [identity_thr] [n_seeds] [n_cores] [threads]")
+         <existing_depth.tsv.gz> <clustering_results_dir> <genome.fa>
+         <bt2_index> <output_dir> [identity_thr] [n_seeds] [n_cores] [threads] [consensus_seeds]")
 }
 
 new_fasta        <- args[1]
 pstvd_db         <- args[2]
 metadata_tsv     <- args[3]
 existing_depth   <- args[4]
-best_params_file <- args[5]
+cluster_dir      <- args[5]        # 聚类结果目录 (替代单个 best_params.tsv)
 genome_fa        <- args[6]
 bt2_index        <- args[7]
 output_dir       <- args[8]
@@ -44,6 +49,7 @@ identity_thr     <- if (length(args) >= 9)  as.numeric(args[9])  else 100.0
 n_seeds          <- if (length(args) >= 10) as.integer(args[10]) else 20
 n_cores          <- if (length(args) >= 11) as.integer(args[11]) else 1
 threads          <- if (length(args) >= 12) as.integer(args[12]) else 32
+consensus_seeds  <- if (length(args) >= 13) as.integer(args[13]) else 20
 
 scripts_dir <- dirname(normalizePath(sys.frame(1)$ofile))
 if (is.na(scripts_dir)) scripts_dir <- "scripts"
@@ -215,20 +221,61 @@ if (nrow(level2) == 0) {
     message("║  Phase 3: 致病性预测                ║")
     message("╚══════════════════════════════════════╝")
 
-    # 加载最优参数
-    best <- read.table(best_params_file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
-    best <- best[best$n_outliers < 10 & best$n_classes <= 10, ]
-    if (nrow(best) == 0) {
-        best <- read.table(best_params_file, header = TRUE, sep = "\t")
-        best <- best[order(-best$score), ]
-    }
-    best <- best[order(-best$score, best$n_classes), ]
-    p <- as.list(best[1, ])
+    # 多种子 consensus 最优参数
+    param_cols <- c("cutoff_viroid_lo","cutoff_viroid_up","cutoff_depth",
+                    "cutoff_align_len","umap__n_neighbor","dbscan__eps","dbscan__minpts")
+    all_best_params <- list()
 
-    message(sprintf("  最优参数: cv(%d,%d) depth=%d aln=%d nn=%d eps=%.1f mp=%d",
+    seed_dirs <- list.files(cluster_dir, pattern = "^umap_seed\\d+$", full.names = TRUE)
+    n_available <- min(length(seed_dirs), consensus_seeds)
+
+    for (sd in seed_dirs[seq_len(n_available)]) {
+        f <- file.path(sd, "clustering_summary.tsv")
+        if (!file.exists(f)) next
+        cls <- read.table(f, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+        cls <- cls[cls$n_outliers < 10 & cls$n_classes <= 10, ]
+        if (nrow(cls) == 0) {
+            cls <- read.table(f, header = TRUE, sep = "\t")
+            cls <- cls[order(-cls$score), ]
+        }
+        cls <- cls[order(-cls$score, cls$n_classes), ]
+        if (nrow(cls) > 0) {
+            # 取该种子最优参数的离散化签名 (round eps to 1 decimal)
+            row <- cls[1, ]
+            sig <- sprintf("cv(%d,%d)_d%d_al%d_nn%d_eps%.1f_mp%d",
+                    row$cutoff_viroid_lo, row$cutoff_viroid_up,
+                    row$cutoff_depth, row$cutoff_align_len,
+                    row$umap__n_neighbor, round(row$dbscan__eps, 1),
+                    row$dbscan__minpts)
+            all_best_params[[length(all_best_params) + 1]] <- list(
+                sig = sig, score = row$score, row = row
+            )
+        }
+    }
+
+    # 投票: 出现最多的参数签名
+    sigs <- sapply(all_best_params, `[[`, "sig")
+    sig_counts <- sort(table(sigs), decreasing = TRUE)
+    top_sig <- names(sig_counts)[1]
+
+    # 平票时取平均 score 最高的
+    winners <- all_best_params[sigs == top_sig]
+    if (length(winners) > 1) {
+        p <- winners[[which.max(sapply(winners, `[[`, "score"))]]$row
+    } else {
+        p <- winners[[1]]$row
+    }
+    p <- as.list(p)
+
+    message(sprintf("  Consensus 最优参数 (%d/%d 种子):", sig_counts[1], n_available))
+    message(sprintf("    cv(%d,%d) depth=%d aln=%d nn=%d eps=%.1f mp=%d (出现 %d 次)",
             p$cutoff_viroid_lo, p$cutoff_viroid_up,
             p$cutoff_depth, p$cutoff_align_len,
-            p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts))
+            p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts,
+            sig_counts[1]))
+    if (length(sig_counts) > 1) {
+        message(sprintf("    次选: %s (出现 %d 次)", names(sig_counts)[2], sig_counts[2]))
+    }
 
     # 加载 + 合并深度矩阵
     existing <- read_tsv(existing_depth, col_names = TRUE, show_col_types = FALSE, name_repair = "minimal")
