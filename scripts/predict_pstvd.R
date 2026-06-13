@@ -258,23 +258,31 @@ if (nrow(level2) == 0) {
     sig_counts <- sort(table(sigs), decreasing = TRUE)
     top_sig <- names(sig_counts)[1]
 
-    # 平票时取平均 score 最高的
-    winners <- all_best_params[sigs == top_sig]
-    if (length(winners) > 1) {
-        p <- winners[[which.max(sapply(winners, `[[`, "score"))]]$row
+    if (sig_counts[1] == 1 && length(sig_counts) > 1) {
+        # 全部不同 → 无共识 → 回退到最高 F1
+        message("  ⚠ 参数签名全部分散 (无共识), 回退到最高 F1 种子")
+        best_row <- all_best_params[[which.max(sapply(all_best_params, `[[`, "score"))]]
+        p <- as.list(best_row$row)
+        message(sprintf("  选择种子 F1=%.3f: %s", best_row$score, best_row$sig))
     } else {
-        p <- winners[[1]]$row
-    }
-    p <- as.list(p)
+        # 平票时取平均 score 最高的
+        winners <- all_best_params[sigs == top_sig]
+        if (length(winners) > 1) {
+            p <- winners[[which.max(sapply(winners, `[[`, "score"))]]$row
+        } else {
+            p <- winners[[1]]$row
+        }
+        p <- as.list(p)
 
-    message(sprintf("  Consensus 最优参数 (%d/%d 种子):", sig_counts[1], n_available))
-    message(sprintf("    cv(%d,%d) depth=%d aln=%d nn=%d eps=%.1f mp=%d (出现 %d 次)",
-            p$cutoff_viroid_lo, p$cutoff_viroid_up,
-            p$cutoff_depth, p$cutoff_align_len,
-            p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts,
-            sig_counts[1]))
-    if (length(sig_counts) > 1) {
-        message(sprintf("    次选: %s (出现 %d 次)", names(sig_counts)[2], sig_counts[2]))
+        message(sprintf("  Consensus 最优参数 (%d/%d 种子):", sig_counts[1], n_available))
+        if (length(sig_counts) > 1) {
+            message(sprintf("    次选: %s (%d 次)", names(sig_counts)[2], sig_counts[2]))
+        }
+        message(sprintf("    cv(%d,%d) depth=%d aln=%d nn=%d eps=%.1f mp=%d (出现 %d 次)",
+                p$cutoff_viroid_lo, p$cutoff_viroid_up,
+                p$cutoff_depth, p$cutoff_align_len,
+                p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts,
+                sig_counts[1]))
     }
 
     # 加载 + 合并深度矩阵
