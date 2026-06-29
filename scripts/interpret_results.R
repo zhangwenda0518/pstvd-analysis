@@ -454,6 +454,103 @@ generate_report <- function(data, results_dir, output_dir) {
         }
     }
 
+    # ---- 图3: 已知标签分离株预测置信度 ----
+    if (nrow(final_pred) > 0) {
+        known_pred <- final_pred %>%
+            filter(role == 'known', true_label %in% c('mild', 'severe')) %>%
+            mutate(match = ifelse(consensus == true_label, 'correct', 'wrong')) %>%
+            arrange(desc(confidence))
+
+        if (nrow(known_pred) > 0) {
+            png(file.path(output_dir, "prediction_confidence.png"), 1200, 800, res = 150)
+            p_conf <- ggplot(known_pred, aes(x = reorder(viroid, confidence), y = confidence,
+                    fill = match)) +
+                geom_col(alpha = 0.85) +
+                geom_text(aes(label = consensus), hjust = -0.2, size = 3) +
+                coord_flip() +
+                scale_fill_manual(values = c(correct = "#20854E", wrong = "#BC3C29")) +
+                scale_y_continuous(labels = scales::percent, limits = c(0, 1.1)) +
+                labs(title = "Per-isolate prediction confidence (known labels)",
+                     subtitle = sprintf("%d labeled isolates across %d seeds", nrow(known_pred), n_experiments),
+                     x = "", y = "Confidence", fill = "") +
+                theme_minimal(base_size = 12)
+            print(p_conf)
+            dev.off()
+            message("预测置信度图已保存到: ", file.path(output_dir, "prediction_confidence.png"))
+        }
+    }
+
+    # ---- 图4: 簇内症状组成 ----
+    if (!is.null(data$predictions) && nrow(data$predictions) > 0) {
+        # 取 F1 最高种子的预测数据
+        cluster_comp <- data$predictions %>%
+            filter(!is.na(class), type != 'unknown', seed == seed[1]) %>%
+            count(class, type) %>%
+            group_by(class) %>%
+            mutate(pct = n / sum(n))
+
+        if (nrow(cluster_comp) > 0) {
+            png(file.path(output_dir, "cluster_composition.png"), 1000, 700, res = 150)
+            p_comp <- ggplot(cluster_comp, aes(x = factor(class), y = pct, fill = type)) +
+                geom_col(position = "fill", alpha = 0.85) +
+                geom_text(aes(label = ifelse(pct > 0.05, sprintf("%d", n), "")),
+                          position = position_fill(vjust = 0.5), size = 4, color = "white") +
+                scale_fill_manual(values = c(severe = "#BC3C29", moderate = "#E18727",
+                                             mild = "#20854E", unknown = "#999999")) +
+                labs(title = "Cluster composition (symptom distribution)",
+                     x = "DBSCAN cluster", y = "Proportion", fill = "Symptom") +
+                theme_minimal(base_size = 14)
+            print(p_comp)
+            dev.off()
+            message("簇组成图已保存到: ", file.path(output_dir, "cluster_composition.png"))
+        }
+    }
+
+    # ---- 图5: 误分类频次排行 ----
+    if (nrow(misclass_freq) > 0) {
+        png(file.path(output_dir, "misclassification_frequency.png"), 1000, 600, res = 150)
+        p_mis <- ggplot(misclass_freq, aes(x = reorder(viroid, n_misclass), y = n_misclass,
+                fill = true_label)) +
+            geom_col(alpha = 0.85) +
+            geom_text(aes(label = pred_as), hjust = -0.2, size = 3.5) +
+            coord_flip() +
+            scale_fill_manual(values = c(mild = "#20854E", severe = "#BC3C29")) +
+            labs(title = "Most frequently misclassified isolates",
+                 subtitle = sprintf("Out of %d experiments", n_experiments),
+                 x = "", y = "Misclassification count", fill = "True symptom") +
+            theme_minimal(base_size = 12)
+        print(p_mis)
+        dev.off()
+        message("误分类频次图已保存到: ", file.path(output_dir, "misclassification_frequency.png"))
+    }
+
+    # ---- 图6: F1分布 vs 聚类质量 ----
+    if (nrow(final_pred) > 0 && !is.null(data$predictions)) {
+        seed_stats <- data$predictions %>%
+            filter(!is.na(class)) %>%
+            group_by(seed) %>%
+            summarise(
+                n_clusters = n_distinct(class[class > 0]),
+                n_outliers = sum(class == 0),
+                .groups = 'drop'
+            )
+
+        png(file.path(output_dir, "f1_vs_clusters.png"), 900, 600, res = 150)
+        if (length(f1_scores) == nrow(seed_stats)) {
+            seed_stats$f1 <- f1_scores
+            p_f1c <- ggplot(seed_stats, aes(x = n_clusters, y = f1)) +
+                geom_jitter(aes(color = factor(n_clusters)), width = 0.2, size = 3, alpha = 0.7) +
+                geom_smooth(method = "loess", se = TRUE, color = "#333333") +
+                labs(title = "F1-score vs number of clusters",
+                     x = "Number of DBSCAN clusters", y = "F1-score (validation)") +
+                theme_minimal(base_size = 14) +
+                theme(legend.position = "none")
+            print(p_f1c)
+            dev.off()
+            message("F1 vs 聚类数图已保存到: ", file.path(output_dir, "f1_vs_clusters.png"))
+        }
+    }
+
     invisible(list(
         f1_scores         = f1_scores,
         final_predictions = final_pred,
