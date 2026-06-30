@@ -53,6 +53,13 @@ n_cores          <- if (length(args) >= 11) as.integer(args[11]) else 1
 threads          <- if (length(args) >= 12) as.integer(args[12]) else 32
 consensus_seeds  <- if (length(args) >= 13) as.integer(args[13]) else 20
 
+# --blast <file> 可选：用已有 BLAST 结果跳过 Phase1 对齐
+blast_file <- NULL
+blast_idx <- which(args == "--blast")
+if (length(blast_idx) > 0 && blast_idx < length(args)) {
+    blast_file <- args[blast_idx + 1]
+}
+
 # 取脚本所在目录 (Rscript 兼容)
 scripts_dir <- dirname(normalizePath(
     sub("--file=", "", commandArgs(trailingOnly = FALSE)[grep("--file=", commandArgs(trailingOnly = FALSE))])
@@ -93,8 +100,8 @@ screen_results <- data.frame(
 )
 
 # ---- 自动 BLAST (可用时) / Biostrings 回退 ----
-blast_file <- file.path(output_dir, "blast_results.txt")
-blast_db   <- file.path(dirname(pstvd_db), "pstvd_blastdb")
+auto_blast  <- file.path(output_dir, "blast_results.txt")
+blast_db    <- file.path(dirname(pstvd_db), "pstvd_blastdb")
 
 # 自动检测 BLAST 路径 (兼容不同安装位置)
 blastn_bin <- Sys.which("blastn")
@@ -112,16 +119,19 @@ if (nchar(makeblastdb_bin) > 0 && nchar(blastn_bin) > 0) {
                 stdout = FALSE, stderr = FALSE)
     }
     message("  BLAST 比对中...")
-    ret <- system2(blastn_bin, c("-db", blast_db, "-query", new_fasta,
-             "-outfmt", "6 qseqid sseqid pident length qlen slen",
-             "-num_threads", min(threads, 64), "-max_target_seqs", "1",
-             "-out", blast_file), stdout = "", stderr = "")
+    blast_cmd <- sprintf('%s -db %s -query %s -outfmt "6 qseqid sseqid pident length qlen slen" -num_threads %d -max_target_seqs 1 -out %s',
+                         blastn_bin, shQuote(blast_db), shQuote(new_fasta),
+                         min(threads, 64), shQuote(auto_blast))
+    ret <- system(blast_cmd)
     if (ret != 0) message(sprintf("  ⚠ BLAST 返回码: %d", ret))
-    if (!file.exists(blast_file) || file.info(blast_file)$size == 0)
+    if (file.exists(auto_blast) && file.info(auto_blast)$size > 0) {
+        blast_file <- auto_blast
+    } else {
         message("  ⚠ BLAST 输出为空, 回退 Biostrings")
+    }
 }
 
-if (file.exists(blast_file) && file.info(blast_file)$size > 0) {
+if (!is.null(blast_file) && file.exists(blast_file) && file.info(blast_file)$size > 0) {
     # ---- BLAST 快速路径 ----
     message("  解析 BLAST 结果...")
     blast <- read.table(blast_file, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
