@@ -112,10 +112,13 @@ if (nchar(makeblastdb_bin) > 0 && nchar(blastn_bin) > 0) {
                 stdout = FALSE, stderr = FALSE)
     }
     message("  BLAST 比对中...")
-    system2(blastn_bin, c("-db", blast_db, "-query", new_fasta,
+    ret <- system2(blastn_bin, c("-db", blast_db, "-query", new_fasta,
              "-outfmt", "6 qseqid sseqid pident length qlen slen",
              "-num_threads", min(threads, 64), "-max_target_seqs", "1",
-             "-out", blast_file), stdout = FALSE, stderr = FALSE)
+             "-out", blast_file), stdout = "", stderr = "")
+    if (ret != 0) message(sprintf("  ⚠ BLAST 返回码: %d", ret))
+    if (!file.exists(blast_file) || file.info(blast_file)$size == 0)
+        message("  ⚠ BLAST 输出为空, 回退 Biostrings")
 }
 
 if (file.exists(blast_file) && file.info(blast_file)$size > 0) {
