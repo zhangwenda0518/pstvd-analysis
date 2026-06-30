@@ -9,11 +9,13 @@
 #       <pstvd_db.fasta> <metadata.tsv> \
 #       <existing_depth.tsv.gz> <clustering_results_dir> \
 #       <genome_fa> <bt2_index_prefix> <output_dir> \
-#       [identity_threshold] [n_seeds] [n_cores] [threads] [consensus_seeds]
+#       [identity_threshold] [n_seeds] [n_cores] [threads] [consensus_seeds] [--blast blast_results.txt]
 #
 # 参数:
 #   clustering_results_dir : Stage 6 输出目录, 含 umap_seed1-100/
 #                          (自动取多个种子的 consensus 最优参数)
+#   --blast <file>        : 使用预计算的 BLAST 结果替代 Phase 1 逐条比对
+#                           格式: qseqid sseqid pident length qlen slen
 #   consensus_seeds        : 取几个种子做 consensus (默认 20)
 #
 # 依赖:
@@ -51,6 +53,14 @@ n_cores          <- if (length(args) >= 11) as.integer(args[11]) else 1
 threads          <- if (length(args) >= 12) as.integer(args[12]) else 32
 consensus_seeds  <- if (length(args) >= 13) as.integer(args[13]) else 20
 
+# --blast 参数解析
+blast_file <- NULL
+blast_idx <- which(args == "--blast")
+if (length(blast_idx) > 0 && blast_idx < length(args)) {
+    blast_file <- args[blast_idx + 1]
+    if (!file.exists(blast_file)) stop("BLAST 结果文件不存在: ", blast_file)
+}
+
 # 取脚本所在目录 (Rscript 兼容)
 scripts_dir <- dirname(normalizePath(
     sub("--file=", "", commandArgs(trailingOnly = FALSE)[grep("--file=", commandArgs(trailingOnly = FALSE))])
@@ -67,19 +77,15 @@ message("╔══════════════════════�
 message("║  Phase 1: 序列筛选                  ║")
 message("╚══════════════════════════════════════╝")
 
-db_seqs <- readDNAStringSet(pstvd_db)
-message(sprintf("  已知序列: %d", length(db_seqs)))
-db_ids <- sapply(strsplit(names(db_seqs), " "), `[`, 1)
-
 meta <- read.table(metadata_tsv, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
-db_labels <- rep("unknown", length(db_seqs))
-for (i in seq_along(db_ids)) {
-    m <- meta$symptom[meta$isolate == db_ids[i]]
-    if (length(m) > 0) { db_labels[i] <- m[1]; next }
-    m <- meta$symptom[meta$isolate == sub("\\..*", "", db_ids[i])]
-    if (length(m) > 0) db_labels[i] <- m[1]
+
+# 加载预测表 (聚类结果中的预测标签，用于无实验标签的参考序列)
+pred_table <- NULL
+pred_path <- file.path(cluster_dir, "interpretation", "prediction_table.csv")
+if (file.exists(pred_path)) {
+    pred_table <- read.csv(pred_path, stringsAsFactors = FALSE)
+    message(sprintf("  加载预测表: %d 条", nrow(pred_table)))
 }
-message(sprintf("  有标签: %d / %d", sum(db_labels != "unknown"), length(db_seqs)))
 
 new_seqs <- readDNAStringSet(new_fasta)
 message(sprintf("  新序列: %d", length(new_seqs)))
@@ -93,36 +99,103 @@ screen_results <- data.frame(
     stringsAsFactors = FALSE
 )
 
-pb <- txtProgressBar(min = 0, max = length(new_seqs), style = 3)
-for (i in seq_along(new_seqs)) {
-    query <- new_seqs[[i]]
-    scores <- rep(NA_real_, length(db_seqs))
-    for (j in seq_along(db_seqs)) {
-        aln <- try(pairwiseAlignment(db_seqs[[j]], query, type = "local"), silent = TRUE)
-        if (!inherits(aln, "try-error")) scores[j] <- pid(aln, type = "PID1")
-    }
-    best_idx <- which.max(scores)
-    # 所有比对失败 → 直接走预测
-    if (length(best_idx) == 0 || is.na(scores[best_idx])) {
-        screen_results$best_match[i]  <- "no_match"
-        screen_results$identity[i]    <- 0
-        screen_results$match_label[i] <- "unknown"
-        screen_results$decision[i]    <- "need_prediction"
-    } else {
-        screen_results$best_match[i]  <- db_ids[best_idx]
-        screen_results$identity[i]    <- round(scores[best_idx], 1)
-        screen_results$match_label[i] <- db_labels[best_idx]
+if (!is.null(blast_file)) {
+    # ---- BLAST 快速路径 ----
+    message(sprintf("  使用 BLAST 结果: %s", blast_file))
+    blast <- read.table(blast_file, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+    colnames(blast) <- c("qseqid", "sseqid", "pident", "length", "qlen", "slen")
+    blast <- blast[order(blast$qseqid, -blast$pident), ]  # 每个 query 最高一致度排前面
 
-        if (scores[best_idx] >= identity_thr) {
-            screen_results$decision[i] <- if (db_labels[best_idx] != "unknown")
-                paste0("inherit_", db_labels[best_idx]) else "inherit_unknown"
-        } else {
-            screen_results$decision[i] <- "need_prediction"
+    # 匹配 metadata 标签
+    blast$meta_label <- NA_character_
+    for (i in seq_len(nrow(blast))) {
+        m <- meta$symptom[meta$isolate == blast$sseqid[i]]
+        if (length(m) > 0) { blast$meta_label[i] <- m[1]; next }
+        m <- meta$symptom[meta$isolate == sub("\\..*", "", blast$sseqid[i])]
+        if (length(m) > 0) blast$meta_label[i] <- m[1]
+    }
+
+    # 匹配预测表标签 (无实验标签的参考用聚类预测)
+    blast$pred_label <- NA_character_
+    if (!is.null(pred_table)) {
+        for (i in seq_len(nrow(blast))) {
+            if (!is.na(blast$meta_label[i]) && blast$meta_label[i] != "unknown") next
+            p <- pred_table$consensus[pred_table$viroid == blast$sseqid[i]]
+            if (length(p) > 0 && !is.na(p[1])) blast$pred_label[i] <- p[1]
         }
     }
-    setTxtProgressBar(pb, i)
+
+    # 最终标签: 优先 metadata → 预测表
+    blast$final_label <- ifelse(!is.na(blast$meta_label) & blast$meta_label != "unknown",
+                                blast$meta_label, blast$pred_label)
+
+    for (qid in names(new_seqs)) {
+        qid_short <- sub(" .*", "", qid)
+        hits <- blast[blast$qseqid == qid_short, ]
+        if (nrow(hits) == 0) {
+            screen_results$best_match[names(new_seqs) == qid]  <- "no_match"
+            screen_results$identity[names(new_seqs) == qid]    <- 0
+            screen_results$match_label[names(new_seqs) == qid] <- "unknown"
+            screen_results$decision[names(new_seqs) == qid]    <- "need_prediction"
+            next
+        }
+        best <- hits[1, ]
+        screen_results$best_match[names(new_seqs) == qid]  <- best$sseqid
+        screen_results$identity[names(new_seqs) == qid]    <- best$pident
+        label_used <- if (!is.na(best$final_label)) best$final_label else "unknown"
+        screen_results$match_label[names(new_seqs) == qid] <- label_used
+
+        if (best$pident >= identity_thr) {
+            screen_results$decision[names(new_seqs) == qid] <- if (label_used != "unknown")
+                paste0("inherit_", label_used) else "inherit_unknown"
+        } else {
+            screen_results$decision[names(new_seqs) == qid] <- "need_prediction"
+        }
+    }
+} else {
+    # ---- Biostrings 逐条比对 (回退) ----
+    db_seqs <- readDNAStringSet(pstvd_db)
+    message(sprintf("  已知序列: %d", length(db_seqs)))
+    db_ids <- sapply(strsplit(names(db_seqs), " "), `[`, 1)
+
+    db_labels <- rep("unknown", length(db_seqs))
+    for (i in seq_along(db_ids)) {
+        m <- meta$symptom[meta$isolate == db_ids[i]]
+        if (length(m) > 0) { db_labels[i] <- m[1]; next }
+        m <- meta$symptom[meta$isolate == sub("\\..*", "", db_ids[i])]
+        if (length(m) > 0) db_labels[i] <- m[1]
+    }
+    message(sprintf("  有标签: %d / %d", sum(db_labels != "unknown"), length(db_seqs)))
+
+    pb <- txtProgressBar(min = 0, max = length(new_seqs), style = 3)
+    for (i in seq_along(new_seqs)) {
+        query <- new_seqs[[i]]
+        scores <- rep(NA_real_, length(db_seqs))
+        for (j in seq_along(db_seqs)) {
+            aln <- try(pairwiseAlignment(db_seqs[[j]], query, type = "local"), silent = TRUE)
+            if (!inherits(aln, "try-error")) scores[j] <- pid(aln, type = "PID1")
+        }
+        best_idx <- which.max(scores)
+        if (length(best_idx) == 0 || is.na(scores[best_idx])) {
+            screen_results$best_match[i]  <- "no_match"
+            screen_results$identity[i]    <- 0
+            screen_results$match_label[i] <- "unknown"
+            screen_results$decision[i]    <- "need_prediction"
+        } else {
+            screen_results$best_match[i]  <- db_ids[best_idx]
+            screen_results$identity[i]    <- round(scores[best_idx], 1)
+            screen_results$match_label[i] <- db_labels[best_idx]
+            if (scores[best_idx] >= identity_thr) {
+                screen_results$decision[i] <- if (db_labels[best_idx] != "unknown")
+                    paste0("inherit_", db_labels[best_idx]) else "inherit_unknown"
+            } else {
+                screen_results$decision[i] <- "need_prediction"
+            }
+        }
+        setTxtProgressBar(pb, i)
+    }
+    close(pb)
 }
-close(pb)
 
 level1 <- screen_results[grepl("inherit", screen_results$decision), ]
 level2 <- screen_results[screen_results$decision == "need_prediction", ]
