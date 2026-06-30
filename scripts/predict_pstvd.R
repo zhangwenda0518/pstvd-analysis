@@ -268,7 +268,14 @@ write.csv(screen_results, file.path(output_dir, "screening_results.csv"), row.na
 # =============================================================================
 # Phase 2: 生成深度矩阵 (仅 Level 2)
 # =============================================================================
-if (nrow(level2) == 0) {
+new_depth_tsv <- file.path(output_dir, "new_depth.tsv")
+new_depth_gz  <- paste0(new_depth_tsv, ".gz")
+
+if (file.exists(new_depth_gz)) {
+    # Phase 2 已完成 → 跳过
+    cat("\n")
+    message(sprintf("║  Phase 2: [跳过] 深度矩阵已存在 (%s)  ║", basename(new_depth_gz)))
+} else if (nrow(level2) == 0) {
     message("\n  全部直接继承, 跳过预测。")
 } else {
     cat("\n")
@@ -373,16 +380,12 @@ if (nrow(level2) == 0) {
     ), stdout = "", stderr = "")
     if (ret != 0) message(sprintf("  ⚠ summarize_coverage 返回码: %d", ret))
 
-    # 如果深度矩阵生成成功，继续 Phase 3
-    new_depth_gz <- paste0(new_depth_tsv, ".gz")
-    if (!file.exists(new_depth_gz)) {
-        message(sprintf("  ⚠ 深度矩阵未生成: %s\n  跳过预测, 输出仅含 Level 1 结果", new_depth_gz))
-        level2 <- data.frame()  # 清空 Level2
-    }
+}  # Phase 2 else 块结束
 
-    # =========================================================================
-    # Phase 3: 预测
-    # =========================================================================
+# =========================================================================
+# Phase 3: 预测 (Phase 2 完成或跳过时执行)
+# =========================================================================
+if (file.exists(new_depth_gz) && nrow(level2) > 0) {
     cat("\n")
     message("╔══════════════════════════════════════╗")
     message("║  Phase 3: 致病性预测                ║")
@@ -580,7 +583,7 @@ if (nrow(level2) == 0) {
         }
         write.csv(pred_output, file.path(output_dir, "level2_predictions.csv"), row.names = FALSE)
     }
-}
+}  # Phase 3 结束
 
 # =============================================================================
 # Phase 4: 综合报告
