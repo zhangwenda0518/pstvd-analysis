@@ -201,9 +201,10 @@ if (nrow(level2) == 0) {
             system2("bowtie2", c("-N", "1", "-L", "16", "-p", threads,
                                 "-x", bt2_index, "-U", fq_path, "-S", sam_path),
                     stdout = FALSE, stderr = FALSE)
-            system2("samtools", c("sort", "-@", threads, sam_path, "-o", bam_path))
+            system2("samtools", c("sort", "-@", threads, sam_path, "-o", bam_path),
+                    stdout = FALSE, stderr = FALSE)
             file.remove(sam_path)
-            system2("samtools", c("index", bam_path))
+            system2("samtools", c("index", bam_path), stdout = FALSE, stderr = FALSE)
         }
 
         # 深度
