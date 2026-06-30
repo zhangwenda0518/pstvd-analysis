@@ -89,6 +89,29 @@ if (file.exists(pred_path)) {
 new_seqs <- readDNAStringSet(new_fasta)
 message(sprintf("  新序列: %d", length(new_seqs)))
 
+# ---- 断点续传: screening_results.csv 已存在则跳过 Phase1 ----
+screen_csv <- file.path(output_dir, "screening_results.csv")
+if (file.exists(screen_csv)) {
+    cached <- try(read.csv(screen_csv, stringsAsFactors = FALSE), silent = TRUE)
+    if (!inherits(cached, "try-error") && nrow(cached) == length(new_seqs)) {
+        screen_results <- cached
+        level1 <- screen_results[grepl("inherit", screen_results$decision), ]
+        level2 <- screen_results[screen_results$decision == "need_prediction", ]
+        message(sprintf("  [跳过] 筛选已完成 (%d Level1, %d Level2)", nrow(level1), nrow(level2)))
+        # 跳过 Phase1 剩余部分, 直接跳到 Phase2
+        # (下面用 goto-like 结构: if 守卫)
+        .skip_phase1 <- TRUE
+    } else {
+        .skip_phase1 <- FALSE
+    }
+} else {
+    .skip_phase1 <- FALSE
+}
+
+if (.skip_phase1) {
+    # Phase 1 already done, skip to Phase 2
+} else {
+
 screen_results <- data.frame(
     query_id   = names(new_seqs),
     best_match = NA_character_,
@@ -239,6 +262,8 @@ message(sprintf("  Level 1 (直接继承): %d", nrow(level1)))
 message(sprintf("  Level 2 (需要预测): %d", nrow(level2)))
 
 write.csv(screen_results, file.path(output_dir, "screening_results.csv"), row.names = FALSE)
+
+}  # 关闭 Phase 1 skip guard
 
 # =============================================================================
 # Phase 2: 生成深度矩阵 (仅 Level 2)
