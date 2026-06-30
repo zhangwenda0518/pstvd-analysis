@@ -91,7 +91,7 @@ for (i in seq_along(new_seqs)) {
     scores <- rep(NA_real_, length(db_seqs))
     for (j in seq_along(db_seqs)) {
         # 先用宽泛的 pairwiseAlignment 找最佳
-        paln <- try(pairwiseAlignment(db_seqs[[j]], query, type = "global"))
+        paln <- try(pairwiseAlignment(db_seqs[[j]], query, type = "local"))
         if (inherits(paln, "try-error")) next
         scores[j] <- pid(paln, type = "PID1")  # 百分比一致度
     }

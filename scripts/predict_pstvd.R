@@ -98,7 +98,7 @@ for (i in seq_along(new_seqs)) {
     query <- new_seqs[[i]]
     scores <- rep(NA_real_, length(db_seqs))
     for (j in seq_along(db_seqs)) {
-        aln <- try(pairwiseAlignment(db_seqs[[j]], query, type = "global"), silent = TRUE)
+        aln <- try(pairwiseAlignment(db_seqs[[j]], query, type = "local"), silent = TRUE)
         if (!inherits(aln, "try-error")) scores[j] <- pid(aln, type = "PID1")
     }
     best_idx <- which.max(scores)
