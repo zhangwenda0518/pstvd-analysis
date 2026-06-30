@@ -102,15 +102,23 @@ for (i in seq_along(new_seqs)) {
         if (!inherits(aln, "try-error")) scores[j] <- pid(aln, type = "PID1")
     }
     best_idx <- which.max(scores)
-    screen_results$best_match[i]  <- db_ids[best_idx]
-    screen_results$identity[i]    <- round(scores[best_idx], 1)
-    screen_results$match_label[i] <- db_labels[best_idx]
-
-    if (!is.na(scores[best_idx]) && scores[best_idx] >= identity_thr) {
-        screen_results$decision[i] <- if (db_labels[best_idx] != "unknown")
-            paste0("inherit_", db_labels[best_idx]) else "inherit_unknown"
+    # 所有比对失败 → 直接走预测
+    if (length(best_idx) == 0 || is.na(scores[best_idx])) {
+        screen_results$best_match[i]  <- "no_match"
+        screen_results$identity[i]    <- 0
+        screen_results$match_label[i] <- "unknown"
+        screen_results$decision[i]    <- "need_prediction"
     } else {
-        screen_results$decision[i] <- "need_prediction"
+        screen_results$best_match[i]  <- db_ids[best_idx]
+        screen_results$identity[i]    <- round(scores[best_idx], 1)
+        screen_results$match_label[i] <- db_labels[best_idx]
+
+        if (scores[best_idx] >= identity_thr) {
+            screen_results$decision[i] <- if (db_labels[best_idx] != "unknown")
+                paste0("inherit_", db_labels[best_idx]) else "inherit_unknown"
+        } else {
+            screen_results$decision[i] <- "need_prediction"
+        }
     }
     setTxtProgressBar(pb, i)
 }
@@ -163,7 +171,9 @@ if (nrow(level2) == 0) {
     fa_files <- list.files(iso_dir, pattern = "\\.fa$", full.names = TRUE)
     message(sprintf("  生成 FASTQ + 比对 + 深度 (%d 条)", length(fa_files)))
 
-    for (fa in fa_files) {
+    pb2 <- txtProgressBar(min = 0, max = length(fa_files), style = 3)
+    for (i_fa in seq_along(fa_files)) {
+        fa  <- fa_files[i_fa]
         sid <- tools::file_path_sans_ext(basename(fa))
 
         # FASTQ
@@ -205,8 +215,9 @@ if (nrow(level2) == 0) {
             system2("gzip", c("-f", depth_raw))
         }
 
-        message(sprintf("    ✓ %s", sid))
+        setTxtProgressBar(pb2, i_fa)
     }
+    close(pb2)
 
     # 汇总深度矩阵
     message("  汇总深度矩阵...")
@@ -366,8 +377,14 @@ if (nrow(level2) == 0) {
         pred_list <- parallel::mclapply(seq_len(n_seeds), run_seed, mc.cores = min(n_cores, n_seeds))
         all_preds <- do.call(cbind, pred_list)
     } else {
+        message(sprintf("  串行模式: %d 种子", n_seeds))
+        pb3 <- txtProgressBar(min = 0, max = n_seeds, style = 3)
         all_preds <- matrix(NA, nrow = length(viroid_names), ncol = n_seeds)
-        for (s in seq_len(n_seeds)) all_preds[, s] <- run_seed(s)
+        for (s in seq_len(n_seeds)) {
+            all_preds[, s] <- run_seed(s)
+            setTxtProgressBar(pb3, s)
+        }
+        close(pb3)
     }
     rownames(all_preds) <- viroid_names
 
