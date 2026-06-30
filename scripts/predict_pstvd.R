@@ -331,10 +331,25 @@ if (nrow(level2) == 0) {
     # 汇总深度矩阵
     message("  汇总深度矩阵...")
     new_depth_tsv <- file.path(output_dir, "new_depth.tsv")
-    system2("python3", c(
-        file.path(scripts_dir, "summarize_coverage.py"),
-        depth_dir, metadata_tsv, genome_fa, new_depth_tsv
-    ), stdout = FALSE, stderr = FALSE)
+    acn_file <- file.path(dirname(pstvd_db), paste0(tools::file_path_sans_ext(basename(pstvd_db)), ".acn"))
+    if (file.exists(acn_file)) {
+        ret <- system2("python3", c(
+            file.path(scripts_dir, "summarize_coverage.py"),
+            depth_dir, acn_file, genome_fa, new_depth_tsv
+        ), stdout = "", stderr = "")
+        if (ret != 0) {
+            message(sprintf("  ⚠ summarize_coverage 返回码: %d", ret))
+        }
+    } else {
+        message(sprintf("  ⚠ ACN 文件不存在: %s, 跳过预测", acn_file))
+    }
+
+    # 如果深度矩阵生成成功，继续 Phase 3
+    new_depth_gz <- paste0(new_depth_tsv, ".gz")
+    if (!file.exists(new_depth_gz)) {
+        message(sprintf("  ⚠ 深度矩阵未生成: %s\n  跳过预测, 输出仅含 Level 1 结果", new_depth_gz))
+        level2 <- data.frame()  # 清空 Level2
+    }
 
     # =========================================================================
     # Phase 3: 预测
