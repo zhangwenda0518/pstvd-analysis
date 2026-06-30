@@ -457,13 +457,22 @@ if (nrow(level2) == 0) {
     newdata  <- read_tsv(paste0(new_depth_tsv, ".gz"), col_names = TRUE,
                          show_col_types = FALSE, name_repair = "minimal")
 
-    if (!"region_id" %in% colnames(existing)) existing$region_id <- existing[[1]]
-    if (!"region_id" %in% colnames(newdata))  newdata$region_id  <- newdata[[1]]
-    new_ids <- setdiff(colnames(newdata), c("region_id", colnames(existing)[1]))
+    # 统一 region_id 列名, 丢弃原始无名列
+    if (!"region_id" %in% colnames(existing)) {
+        existing$region_id <- existing[[1]]
+        existing <- existing[, -1, drop = FALSE]  # 丢弃舊第1列
+    }
+    if (!"region_id" %in% colnames(newdata)) {
+        newdata$region_id <- newdata[[1]]
+        newdata <- newdata[, -1, drop = FALSE]
+    }
+    # 取新序列 ID (除 region_id 外不在 existing 中的列)
+    new_ids <- setdiff(colnames(newdata), colnames(existing))
+    new_ids <- setdiff(new_ids, "region_id")
 
-    merged <- existing %>%
-        select(region_id, everything()) %>%
-        full_join(newdata %>% select(region_id, all_of(new_ids)), by = "region_id")
+    # 合并
+    merged <- merge(existing, newdata %>% select(region_id, all_of(new_ids)),
+                    by = "region_id", all = TRUE)
     merged[is.na(merged)] <- 0
     rownames(merged) <- merged$region_id
     merged$region_id <- NULL
