@@ -51,8 +51,11 @@ n_cores          <- if (length(args) >= 11) as.integer(args[11]) else 1
 threads          <- if (length(args) >= 12) as.integer(args[12]) else 32
 consensus_seeds  <- if (length(args) >= 13) as.integer(args[13]) else 20
 
-scripts_dir <- dirname(normalizePath(sys.frame(1)$ofile))
-if (is.na(scripts_dir)) scripts_dir <- "scripts"
+# 取脚本所在目录 (Rscript 兼容)
+scripts_dir <- dirname(normalizePath(
+    sub("--file=", "", commandArgs(trailingOnly = FALSE)[grep("--file=", commandArgs(trailingOnly = FALSE))])
+))
+if (is.na(scripts_dir) || scripts_dir == ".") scripts_dir <- "scripts"
 
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
