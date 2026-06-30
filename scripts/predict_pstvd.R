@@ -96,14 +96,23 @@ screen_results <- data.frame(
 blast_file <- file.path(output_dir, "blast_results.txt")
 blast_db   <- file.path(dirname(pstvd_db), "pstvd_blastdb")
 
-if (nchar(Sys.which("makeblastdb")) > 0 && nchar(Sys.which("blastn")) > 0) {
+# 自动检测 BLAST 路径 (兼容不同安装位置)
+blastn_bin <- Sys.which("blastn")
+makeblastdb_bin <- Sys.which("makeblastdb")
+if (nchar(blastn_bin) == 0) blastn_bin <- Sys.which("blastn")
+if (nchar(makeblastdb_bin) == 0) {
+    # 尝试 blastn 同目录下的 makeblastdb
+    makeblastdb_bin <- file.path(dirname(blastn_bin), "makeblastdb")
+}
+
+if (nchar(makeblastdb_bin) > 0 && nchar(blastn_bin) > 0) {
     if (!file.exists(paste0(blast_db, ".nhr"))) {
         message("  构建 BLAST 数据库...")
-        system2("makeblastdb", c("-in", pstvd_db, "-dbtype", "nucl", "-out", blast_db),
+        system2(makeblastdb_bin, c("-in", pstvd_db, "-dbtype", "nucl", "-out", blast_db),
                 stdout = FALSE, stderr = FALSE)
     }
     message("  BLAST 比对中...")
-    system2("blastn", c("-db", blast_db, "-query", new_fasta,
+    system2(blastn_bin, c("-db", blast_db, "-query", new_fasta,
              "-outfmt", "6 qseqid sseqid pident length qlen slen",
              "-num_threads", min(threads, 64), "-max_target_seqs", "1",
              "-out", blast_file), stdout = FALSE, stderr = FALSE)
