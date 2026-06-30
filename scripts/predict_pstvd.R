@@ -53,14 +53,6 @@ n_cores          <- if (length(args) >= 11) as.integer(args[11]) else 1
 threads          <- if (length(args) >= 12) as.integer(args[12]) else 32
 consensus_seeds  <- if (length(args) >= 13) as.integer(args[13]) else 20
 
-# --blast 参数解析
-blast_file <- NULL
-blast_idx <- which(args == "--blast")
-if (length(blast_idx) > 0 && blast_idx < length(args)) {
-    blast_file <- args[blast_idx + 1]
-    if (!file.exists(blast_file)) stop("BLAST 结果文件不存在: ", blast_file)
-}
-
 # 取脚本所在目录 (Rscript 兼容)
 scripts_dir <- dirname(normalizePath(
     sub("--file=", "", commandArgs(trailingOnly = FALSE)[grep("--file=", commandArgs(trailingOnly = FALSE))])
@@ -100,12 +92,29 @@ screen_results <- data.frame(
     stringsAsFactors = FALSE
 )
 
-if (!is.null(blast_file)) {
+# ---- 自动 BLAST (可用时) / Biostrings 回退 ----
+blast_file <- file.path(output_dir, "blast_results.txt")
+blast_db   <- file.path(dirname(pstvd_db), "pstvd_blastdb")
+
+if (nchar(Sys.which("makeblastdb")) > 0 && nchar(Sys.which("blastn")) > 0) {
+    if (!file.exists(paste0(blast_db, ".nhr"))) {
+        message("  构建 BLAST 数据库...")
+        system2("makeblastdb", c("-in", pstvd_db, "-dbtype", "nucl", "-out", blast_db),
+                stdout = FALSE, stderr = FALSE)
+    }
+    message("  BLAST 比对中...")
+    system2("blastn", c("-db", blast_db, "-query", new_fasta,
+             "-outfmt", "6 qseqid sseqid pident length qlen slen",
+             "-num_threads", min(threads, 64), "-max_target_seqs", "1",
+             "-out", blast_file), stdout = FALSE, stderr = FALSE)
+}
+
+if (file.exists(blast_file) && file.info(blast_file)$size > 0) {
     # ---- BLAST 快速路径 ----
-    message(sprintf("  使用 BLAST 结果: %s", blast_file))
+    message("  解析 BLAST 结果...")
     blast <- read.table(blast_file, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
     colnames(blast) <- c("qseqid", "sseqid", "pident", "length", "qlen", "slen")
-    blast <- blast[order(blast$qseqid, -blast$pident), ]  # 每个 query 最高一致度排前面
+    blast <- blast[order(blast$qseqid, -blast$pident), ]
 
     # 匹配 metadata 标签
     blast$meta_label <- NA_character_
