@@ -94,6 +94,7 @@ screen_results <- data.frame(
     query_id   = names(new_seqs),
     best_match = NA_character_,
     identity   = NA_real_,
+    coverage   = NA_real_,
     match_label = NA_character_,
     decision   = NA_character_,
     stringsAsFactors = FALSE
@@ -140,12 +141,15 @@ if (!is.null(blast_file)) {
             next
         }
         best <- hits[1, ]
+        cov <- best$length / best$qlen * 100  # 覆盖度 = 比对长度/查询长度
         screen_results$best_match[names(new_seqs) == qid]  <- best$sseqid
         screen_results$identity[names(new_seqs) == qid]    <- best$pident
+        screen_results$coverage[names(new_seqs) == qid]    <- round(cov, 1)
         label_used <- if (!is.na(best$final_label)) best$final_label else "unknown"
         screen_results$match_label[names(new_seqs) == qid] <- label_used
 
-        if (best$pident >= identity_thr) {
+        # 阈值: 一致度≥threshold AND 覆盖度≥95%
+        if (best$pident >= identity_thr && cov >= 95) {
             screen_results$decision[names(new_seqs) == qid] <- if (label_used != "unknown")
                 paste0("inherit_", label_used) else "inherit_unknown"
         } else {
