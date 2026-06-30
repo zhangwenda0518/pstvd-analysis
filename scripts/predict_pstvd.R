@@ -356,18 +356,22 @@ if (nrow(level2) == 0) {
     # 汇总深度矩阵
     message("  汇总深度矩阵...")
     new_depth_tsv <- file.path(output_dir, "new_depth.tsv")
-    acn_file <- file.path(dirname(pstvd_db), paste0(tools::file_path_sans_ext(basename(pstvd_db)), ".acn"))
-    if (file.exists(acn_file)) {
-        ret <- system2("python3", c(
-            file.path(scripts_dir, "summarize_coverage.py"),
-            depth_dir, acn_file, genome_fa, new_depth_tsv
-        ), stdout = "", stderr = "")
-        if (ret != 0) {
-            message(sprintf("  ⚠ summarize_coverage 返回码: %d", ret))
-        }
-    } else {
-        message(sprintf("  ⚠ ACN 文件不存在: %s, 跳过预测", acn_file))
+
+    # 生成临时 ACN 文件 (原 PSTVd IDs + 新序列 IDs)
+    orig_acn <- file.path(dirname(pstvd_db), paste0(tools::file_path_sans_ext(basename(pstvd_db)), ".acn"))
+    temp_acn <- file.path(output_dir, "temp_ids.acn")
+    if (file.exists(orig_acn)) {
+        file.copy(orig_acn, temp_acn, overwrite = TRUE)
     }
+    # 追加新序列 ID (每个一行: ID\tID)
+    cat(paste0(level2$query_id, "\t", level2$query_id, "\n"),
+        file = temp_acn, append = TRUE, sep = "")
+
+    ret <- system2("python3", c(
+        file.path(scripts_dir, "summarize_coverage.py"),
+        depth_dir, temp_acn, genome_fa, new_depth_tsv
+    ), stdout = "", stderr = "")
+    if (ret != 0) message(sprintf("  ⚠ summarize_coverage 返回码: %d", ret))
 
     # 如果深度矩阵生成成功，继续 Phase 3
     new_depth_gz <- paste0(new_depth_tsv, ".gz")
