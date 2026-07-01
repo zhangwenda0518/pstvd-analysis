@@ -488,10 +488,10 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
     }
     merged <- merged[lens > p$cutoff_align_len, , drop = FALSE]
 
-    # 按 region_id 汇总
+    # 按 region_id 汇总 (只对数值列求和)
     merged_agg <- merged %>%
         group_by(region_id) %>%
-        summarise(across(everything(), sum), .groups = 'drop') %>%
+        summarise(across(where(is.numeric), sum), .groups = 'drop') %>%
         as.data.frame()
     rownames(merged_agg) <- merged_agg$region_id
     merged_agg$region_id <- NULL
