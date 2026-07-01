@@ -455,22 +455,13 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
                 sig_counts[1]))
     }
 
-    # 加载 + 合并深度矩阵 (手工修复空列名)
-    existing <- as.data.frame(read_tsv(existing_depth, col_names = FALSE,
-                                       show_col_types = FALSE, skip = 1))
-    newdata  <- as.data.frame(read_tsv(paste0(new_depth_tsv, ".gz"), col_names = FALSE,
-                                       show_col_types = FALSE, skip = 1))
-    # 第1列 = region_id, 其余列从原表头读取
-    hdr_ex <- as.character(read_tsv(existing_depth, col_names = FALSE,
-                                    show_col_types = FALSE, n_max = 1))
-    hdr_new <- as.character(read_tsv(paste0(new_depth_tsv, ".gz"), col_names = FALSE,
-                                     show_col_types = FALSE, n_max = 1))
-    colnames(existing) <- c("region_id", hdr_ex[-1])
-    colnames(newdata)  <- c("region_id", hdr_new[-1])
-
-    # 数值列转换
-    for (j in seq_along(existing)[-1]) existing[[j]] <- as.numeric(existing[[j]])
-    for (j in seq_along(newdata)[-1])  newdata[[j]]  <- as.numeric(newdata[[j]])
+    # 加载深度矩阵 (read_tsv 默认空首列 → 手工命名 region_id)
+    existing <- as.data.frame(read_tsv(existing_depth, col_names = TRUE,
+                                       show_col_types = FALSE, name_repair = "minimal"))
+    newdata  <- as.data.frame(read_tsv(paste0(new_depth_tsv, ".gz"), col_names = TRUE,
+                                       show_col_types = FALSE, name_repair = "minimal"))
+    colnames(existing)[1] <- "region_id"
+    colnames(newdata)[1]  <- "region_id"
     # 取新序列 ID
     new_ids <- setdiff(colnames(newdata), colnames(existing))
     new_ids <- setdiff(new_ids, "region_id")
