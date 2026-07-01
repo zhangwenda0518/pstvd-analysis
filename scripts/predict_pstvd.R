@@ -496,6 +496,7 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
     rownames(merged_agg) <- merged_agg$region_id
     merged_agg$region_id <- NULL
     merged_mat <- as.matrix(merged_agg)
+    raw_depth_mat <- merged_mat  # 保存原始深度, 供后续画图
 
     keep <- (p$cutoff_viroid_lo < rowSums(merged_mat > 0)) &
             (rowSums(merged_mat > 0) < p$cutoff_viroid_up)
@@ -630,6 +631,105 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
         print(p)
         dev.off()
         message(sprintf("  UMAP 图: %s", file.path(output_dir, "umap_prediction.png")))
+    }
+
+    # ---- 图2: 新序列深度分布 ----
+    if (nrow(pred_output) > 0 && exists("raw_depth_mat")) {
+        message("  绘制深度分布图...")
+        new_cols <- intersect(new_ids, colnames(raw_depth_mat))
+        if (length(new_cols) > 0) {
+            # 解析基因组位置
+            rgn_parts <- str_split(rownames(raw_depth_mat), ':', simplify = TRUE)
+            chr_info <- character(nrow(rgn_parts))
+            pos_info <- numeric(nrow(rgn_parts))
+            for (j in seq_len(nrow(rgn_parts))) {
+                chr_info[j] <- rgn_parts[j, 1]
+                if (ncol(rgn_parts) >= 2) {
+                    cds <- str_split(rgn_parts[j, 2], '-', simplify = TRUE)
+                    pos_info[j] <- if (ncol(cds) >= 2) (as.numeric(cds[1]) + as.numeric(cds[2])) / 2 else j
+                } else pos_info[j] <- j
+            }
+            # 每个染色体单独画, 新序列叠在一起
+            unique_chrs <- unique(chr_info)
+            n_plots <- min(length(unique_chrs), 9)
+            png(file.path(output_dir, "depth_distribution.png"), 1600, 300 * n_plots, res = 150)
+            par(mfrow = c(n_plots, 1), mar = c(3, 4, 2, 1))
+            for (cc in unique_chrs[seq_len(n_plots)]) {
+                ridx <- which(chr_info == cc)
+                if (length(ridx) == 0) next
+                mat_plot <- raw_depth_mat[ridx, new_cols, drop = FALSE]
+                yaxt <- if (max(mat_plot) > 0) max(mat_plot) else 1
+                plot(pos_info[ridx], rep(0, length(ridx)), type = 'n',
+                     ylim = c(0, yaxt * 1.1), main = cc,
+                     xlab = "", ylab = "深度", frame.plot = FALSE)
+                for (ic in seq_along(new_cols)) {
+                    lines(pos_info[ridx], mat_plot[, ic], col = adjustcolor(ic, 0.3), lwd = 0.5)
+                }
+            }
+            dev.off()
+            message(sprintf("  深度分布: %s", file.path(output_dir, "depth_distribution.png")))
+        }
+    }
+
+    # ---- 图3: 预测置信度柱状图 ----
+    if (nrow(pred_output) > 0) {
+        message("  绘制置信度柱状图...")
+        png(file.path(output_dir, "prediction_confidence.png"), 1200, 800, res = 180)
+        po_sorted <- pred_output[order(pred_output$confidence, decreasing = TRUE), ]
+        po_sorted$isolate_short <- substr(po_sorted$isolate, 1, 20)
+        bar_cols <- ifelse(po_sorted$predicted == 'mild', '#4DAF4A',
+                    ifelse(po_sorted$predicted == 'severe', '#E41A1C', '#999999'))
+        bp <- barplot(po_sorted$confidence * 100, names.arg = po_sorted$isolate_short,
+                      las = 2, cex.names = 0.6, col = bar_cols,
+                      ylim = c(0, 100), border = NA,
+                      main = "新序列致病性预测置信度",
+                      ylab = "置信度 (%)", xlab = "")
+        legend("topright", legend = c('Mild','Severe','Uncertain'),
+               fill = c('#4DAF4A','#E41A1C','#999999'), cex = 0.8, border = NA)
+        abline(h = 50, lty = 2, col = 'gray60')
+        dev.off()
+        message(sprintf("  置信度: %s", file.path(output_dir, "prediction_confidence.png")))
+    }
+
+    # ---- 图4: 预测结果 Heatmap ----
+    if (nrow(pred_output) > 0 && exists("raw_depth_mat")) {
+        message("  绘制预测 heatmap...")
+        new_cols <- intersect(new_ids, colnames(raw_depth_mat))
+        if (length(new_cols) > 1) {
+            # 取新序列深度最高区域 (top 500)
+            depth_means <- rowMeans(raw_depth_mat[, new_cols, drop = FALSE])
+            top_regions <- order(depth_means, decreasing = TRUE)[seq_len(min(500, length(depth_means)))]
+            hm_raw <- raw_depth_mat[top_regions, new_cols, drop = FALSE]
+            # 裁剪极端值
+            hm_raw[hm_raw > 500] <- 500
+            # 聚类排序
+            hc_row <- hclust(dist(log1p(hm_raw)), method = "ward.D2")
+            hc_col <- hclust(dist(t(log1p(hm_raw))), method = "ward.D2")
+            # 预测标签色条
+            col_annot <- sapply(new_cols, function(x) {
+                row <- pred_output[pred_output$isolate == x, ]
+                if (nrow(row) > 0) return(row$predicted) else return("unknown")
+            })
+            annot_col <- list(
+                prediction = c(mild = '#4DAF4A', severe = '#E41A1C', uncertain = '#999999', unknown = '#FFFFFF')
+            )
+            annot_df <- data.frame(prediction = factor(col_annot, levels = c('mild','severe','uncertain','unknown')),
+                                   row.names = new_cols)
+
+            png(file.path(output_dir, "prediction_heatmap.png"), 1800, 1400, res = 180)
+            pheatmap::pheatmap(
+                log1p(hm_raw),
+                cluster_rows = hc_row, cluster_cols = hc_col,
+                annotation_col = annot_df, annotation_colors = annot_col,
+                show_rownames = FALSE, show_colnames = TRUE,
+                fontsize_col = 8, fontsize = 10,
+                color = colorRampPalette(c("white", "#FEE08B", "#D73027", "#000000"))(100),
+                main = "新序列深度 Heatmap (log1p)",
+                border_color = NA
+            )
+            dev.off()
+            message(sprintf("  Heatmap: %s", file.path(output_dir, "prediction_heatmap.png")))
+        }
     }
 }  # Phase 3 结束
 
