@@ -157,7 +157,8 @@ if (nchar(makeblastdb_bin) == 0) {
     makeblastdb_bin <- file.path(dirname(blastn_bin), "makeblastdb")
 }
 
-if (nchar(makeblastdb_bin) > 0 && nchar(blastn_bin) > 0) {
+# --blast 用户指定 → 跳过自动 BLAST; 否则自动运行
+if (is.null(blast_file) && nchar(makeblastdb_bin) > 0 && nchar(blastn_bin) > 0) {
     if (!file.exists(paste0(blast_db, ".nhr"))) {
         message("  构建 BLAST 数据库...")
         system2(makeblastdb_bin, c("-in", pstvd_db, "-dbtype", "nucl", "-out", blast_db),
@@ -502,9 +503,17 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
                                        show_col_types = FALSE, name_repair = "minimal"))
     colnames(existing)[1] <- "region_id"
     colnames(newdata)[1]  <- "region_id"
-    # 取新序列 ID
+    # 取新序列 ID + 建立 截断名→全名 映射 (summarize_coverage 去掉了版本号)
     new_ids <- setdiff(colnames(newdata), colnames(existing))
     new_ids <- setdiff(new_ids, "region_id")
+    # 截断名 → 全名: level2$query_id 是全名, new_ids 是截断名
+    id_full <- sub(" .*", "", level2$query_id)  # FASTA 头取第一部分
+    id_trunc <- sapply(strsplit(id_full, "\\."), function(x) paste(x[-length(x)], collapse = "."))
+    # 对于只有版本号后缀的 ID (NC_002030.1), strsplit 会去掉 .1 保留 NC_002030
+    # 但 summarize_coverage 用 split(".")[0]→取第一个点之前的内容
+    # 对于 XXXX_NC_002030.1: split→["XXXX_NC_002030","1"]→[0]="XXXX_NC_002030"
+    id_trunc2 <- sapply(strsplit(id_full, "\\."), `[`, 1)
+    id_map <- setNames(id_full, id_trunc2)
     message(sprintf("  新增列: %d 个", length(new_ids)))
 
     # 逐列追加到 existing (避开 merge 列名匹配问题)
@@ -590,16 +599,23 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
         pl
     }
 
-    run_seed <- function(s) {
+    # UMAP+DBSCAN 核心 (种子预测 + 可视化共用)
+    umap_dbscan_once <- function(s) {
         set.seed(202020 + s)
         cfg <- umap.defaults
         cfg$n_neighbors  <- p$umap__n_neighbor
         cfg$n_epochs     <- 100
         cfg$random_state <- 202020 + s
         res <- try(umap(t(merged_mat), config = cfg))
-        if (inherits(res, 'try-error')) return(rep(NA, ncol(merged_mat)))
+        if (inherits(res, 'try-error')) return(NULL)
         db <- dbscan(res$layout, eps = p$dbscan__eps, minPts = p$dbscan__minpts)
-        estimate_label(true_labels, db$cluster)
+        list(umap = res, db = db)
+    }
+
+    run_seed <- function(s) {
+        obj <- umap_dbscan_once(s)
+        if (is.null(obj)) return(rep(NA, ncol(merged_mat)))
+        estimate_label(true_labels, obj$db$cluster)
     }
 
     if (.Platform$OS.type == "unix" && n_cores > 1) {
@@ -617,17 +633,8 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
     }
     rownames(all_preds) <- viroid_names
 
-    # ---- 最后一次 UMAP+DBSCAN 供可视化 ----
-    run_seed_vis <- function(s) {
-        set.seed(202020 + s)
-        cfg <- umap.defaults
-        cfg$n_neighbors  <- p$umap__n_neighbor
-        cfg$n_epochs     <- 100
-        cfg$random_state <- 202020 + s
-        u <- umap(t(merged_mat), config = cfg)
-        list(umap = u, db = dbscan(u$layout, eps = p$dbscan__eps, minPts = p$dbscan__minpts))
-    }
-    vis <- run_seed_vis(1)
+    # 最后一次 UMAP+DBSCAN 供可视化
+    vis <- umap_dbscan_once(1)
     umap_final_res <- vis$umap
     db_final_res   <- vis$db
 
@@ -643,8 +650,9 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
         mv <- sum(preds == 'mild')
         sv <- sum(preds == 'severe')
         consensus <- if (mv > sv) 'mild' else if (sv > mv) 'severe' else 'uncertain'
+        vid_full <- if (vid %in% names(id_map)) id_map[[vid]] else vid
         pred_output <- rbind(pred_output, data.frame(
-            isolate = vid, predicted = consensus,
+            isolate = vid_full, predicted = consensus,
             confidence = max(mv, sv) / n_v,
             mild_votes = mv, severe_votes = sv, n_valid = n_v,
             stringsAsFactors = FALSE
@@ -677,11 +685,14 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
             geom_point(alpha = 0.4, size = 2) +
             geom_point(data = subset(plot_data, is_new),
                        size = 5, stroke = 2, color = "#E41A1C", shape = 8) +
-            ggrepel::geom_text_repel(
-                data = subset(plot_data, is_new),
-                aes(label = label),
-                size = 3, color = "#E41A1C", max.overlaps = 30, box.padding = 1
-            ) +
+            {
+                if (requireNamespace("ggrepel", quietly = TRUE))
+                    ggrepel::geom_text_repel(
+                        data = subset(plot_data, is_new),
+                        aes(label = label),
+                        size = 3, color = "#E41A1C", max.overlaps = 30, box.padding = 1
+                    )
+            } +
             guides(color = guide_legend(override.aes = list(alpha = 1))) +
             theme_minimal(base_size = 14) +
             labs(title = "PSTVd 致病性预测 — 新序列投影",
@@ -778,7 +789,8 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
                                    row.names = new_cols)
 
             png(file.path(model_dir, "prediction_heatmap.png"), 1800, 1400, res = 180)
-            pheatmap::pheatmap(
+            if (requireNamespace("pheatmap", quietly = TRUE)) {
+                pheatmap::pheatmap(
                 log1p(hm_raw),
                 cluster_rows = hc_row, cluster_cols = hc_col,
                 annotation_col = annot_df, annotation_colors = annot_col,
@@ -788,8 +800,12 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
                 main = "新序列深度 Heatmap (log1p)",
                 border_color = NA
             )
-            dev.off()
-            message(sprintf("  Heatmap: %s", file.path(model_dir, "prediction_heatmap.png")))
+                dev.off()
+                message(sprintf("  Heatmap: %s", file.path(model_dir, "prediction_heatmap.png")))
+            } else {
+                dev.off()
+                message("  Heatmap: [跳过] pheatmap 未安装")
+            }
         }
     }
     # 收集模型结果供 Phase 4 对比
