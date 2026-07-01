@@ -482,14 +482,11 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
             existing[[col]][!is.na(idx)] <- newdata[[col]][idx[!is.na(idx)]]
         }
     }
-    merged <- existing
-    # 去重 region_id (防止 duplicate row.names)
-    merged <- merged[!duplicated(merged$region_id), ]
-    rownames(merged) <- merged$region_id
-    merged$region_id <- NULL
+    merged <- as.data.frame(existing)
+    merged <- merged[!duplicated(merged$region_id), , drop = FALSE]
 
-    # 预处理
-    region_parts <- str_split(rownames(merged), ':', simplify = TRUE)
+    # 按区域长度过滤
+    region_parts <- str_split(merged$region_id, ':', simplify = TRUE)
     if (ncol(region_parts) >= 2) {
         coords <- str_split(region_parts[, 2], '-', simplify = TRUE)
         lens <- as.integer(coords[, 2]) - as.integer(coords[, 1]) + 1
@@ -497,8 +494,12 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
         lens <- rep(p$cutoff_align_len + 1, nrow(merged))
     }
     merged <- merged[lens > p$cutoff_align_len, , drop = FALSE]
-    merged$region_id <- rownames(merged)
-    merged_agg <- merged %>% group_by(region_id) %>% summarise_all(sum) %>% as.data.frame()
+
+    # 按 region_id 汇总
+    merged_agg <- merged %>%
+        group_by(region_id) %>%
+        summarise(across(everything(), sum), .groups = 'drop') %>%
+        as.data.frame()
     rownames(merged_agg) <- merged_agg$region_id
     merged_agg$region_id <- NULL
     merged_mat <- as.matrix(merged_agg)
