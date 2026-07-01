@@ -483,6 +483,8 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
         }
     }
     merged <- existing
+    # 去重 region_id (防止 duplicate row.names)
+    merged <- merged[!duplicated(merged$region_id), ]
     rownames(merged) <- merged$region_id
     merged$region_id <- NULL
 
