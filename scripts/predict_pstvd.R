@@ -469,13 +469,15 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
         newdata$region_id <- newdata[[1]]
         newdata <- newdata[, -1, drop = FALSE]
     }
-    # 取新序列 ID (除 region_id 外不在 existing 中的列)
+    # 取新序列 ID
     new_ids <- setdiff(colnames(newdata), colnames(existing))
     new_ids <- setdiff(new_ids, "region_id")
+    message(sprintf("  新增列: %d 个", length(new_ids)))
 
-    # 合并
-    merged <- merge(existing, newdata %>% select(region_id, all_of(new_ids)),
-                    by = "region_id", all = TRUE)
+    # 用 base::merge (outer join by region_id)
+    keep_cols <- c("region_id", new_ids)
+    newdata_sub <- newdata[, keep_cols[keep_cols %in% colnames(newdata)], drop = FALSE]
+    merged <- merge(existing, newdata_sub, by = "region_id", all = TRUE)
     merged[is.na(merged)] <- 0
     rownames(merged) <- merged$region_id
     merged$region_id <- NULL
