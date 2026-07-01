@@ -555,6 +555,20 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
     }
     rownames(all_preds) <- viroid_names
 
+    # ---- 最后一次 UMAP+DBSCAN 供可视化 ----
+    run_seed_vis <- function(s) {
+        set.seed(202020 + s)
+        cfg <- umap.defaults
+        cfg$n_neighbors  <- p$umap__n_neighbor
+        cfg$n_epochs     <- 100
+        cfg$random_state <- 202020 + s
+        u <- umap(t(merged_mat), config = cfg)
+        list(umap = u, db = dbscan(u$layout, eps = p$dbscan__eps, minPts = p$dbscan__minpts))
+    }
+    vis <- run_seed_vis(1)
+    umap_final_res <- vis$umap
+    db_final_res   <- vis$db
+
     # 汇总 Level 2 结果
     pred_output <- data.frame(stringsAsFactors = FALSE)
     for (vid in new_ids) {
@@ -584,6 +598,38 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
                     row$mild_votes, row$severe_votes))
         }
         write.csv(pred_output, file.path(output_dir, "level2_predictions.csv"), row.names = FALSE)
+    }
+
+    # ---- 绘制 UMAP 预测图 ----
+    if (exists("umap_final_res")) {
+        png(file.path(output_dir, "umap_prediction.png"), 1400, 1100, res = 200)
+        plot_data <- data.frame(
+            DIM1    = umap_final_res$layout[, 1],
+            DIM2    = umap_final_res$layout[, 2],
+            type    = factor(true_labels, levels = c('severe','moderate','mild','unknown')),
+            cluster = as.factor(db_final_res$cluster),
+            is_new  = viroid_names %in% new_ids,
+            label   = ifelse(viroid_names %in% new_ids, viroid_names, "")
+        )
+        p <- ggplot(plot_data, aes(x = DIM1, y = DIM2, color = cluster, shape = type)) +
+            geom_point(alpha = 0.4, size = 2) +
+            geom_point(data = subset(plot_data, is_new),
+                       size = 5, stroke = 2, color = "#E41A1C", shape = 8) +
+            ggrepel::geom_text_repel(
+                data = subset(plot_data, is_new),
+                aes(label = label),
+                size = 3, color = "#E41A1C", max.overlaps = 30, box.padding = 1
+            ) +
+            guides(color = guide_legend(override.aes = list(alpha = 1))) +
+            theme_minimal(base_size = 14) +
+            labs(title = "PSTVd 致病性预测 — 新序列投影",
+                 subtitle = sprintf("★ 新序列 (%d) | nn=%d eps=%.1f mp=%d",
+                                   sum(plot_data$is_new),
+                                   p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts),
+                 x = "UMAP DIM1", y = "UMAP DIM2")
+        print(p)
+        dev.off()
+        message(sprintf("  UMAP 图: %s", file.path(output_dir, "umap_prediction.png")))
     }
 }  # Phase 3 结束
 
