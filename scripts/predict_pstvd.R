@@ -36,7 +36,9 @@ args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 9) {
     stop("用法: Rscript predict_pstvd.R <new.fa> <pstvd_db.fa> <metadata.tsv>
          <existing_depth.tsv.gz> <clustering_results_dir> <genome.fa>
-         <bt2_index> <output_dir> [identity_thr] [n_seeds] [n_cores] [threads] [consensus_seeds]")
+         <bt2_index> <output_dir> [identity_thr] [n_seeds] [n_cores] [threads] [consensus_seeds]
+         --multi N  用 Top N 共识参数集分别预测 (默认 1)
+         --blast <file>  用已有 BLAST 结果")
 }
 
 new_fasta        <- args[1]
@@ -52,6 +54,14 @@ n_seeds          <- if (length(args) >= 10) as.integer(args[10]) else 20
 n_cores          <- if (length(args) >= 11) as.integer(args[11]) else 1
 threads          <- if (length(args) >= 12) as.integer(args[12]) else 32
 consensus_seeds  <- if (length(args) >= 13) as.integer(args[13]) else 20
+
+# --multi N: 用 Top N 共识参数集分别预测
+multi_n <- 1
+multi_idx <- which(args == "--multi")
+if (length(multi_idx) > 0 && multi_idx < length(args)) {
+    multi_n <- as.integer(args[multi_idx + 1])
+    if (is.na(multi_n) || multi_n < 1) multi_n <- 1
+}
 
 # --blast <file> 可选：用已有 BLAST 结果跳过 Phase1 对齐
 blast_file <- NULL
@@ -455,7 +465,25 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
                 sig_counts[1]))
     }
 
-    # 加载深度矩阵 (read_tsv 默认空首列 → 手工命名 region_id)
+    # 收集 Top N 共识模型参数
+    top_models <- list()
+    if (sig_counts[1] == 1 && length(sig_counts) > 1) {
+        top_models[[1]] <- as.list(best_row$row)
+    } else {
+        for (k in seq_len(min(multi_n, length(sig_counts)))) {
+            sig_k <- names(sig_counts)[k]
+            w <- all_best_params[sigs == sig_k]
+            if (length(w) > 1) {
+                top_models[[k]] <- as.list(w[[which.max(sapply(w, `[[`, "score"))]]$row)
+            } else {
+                top_models[[k]] <- as.list(w[[1]]$row)
+            }
+        }
+    }
+    if (length(top_models) == 0) top_models[[1]] <- p
+    message(sprintf("  使用 %d 个共识模型进行预测", length(top_models)))
+
+    # 加载深度矩阵 — 所有模型共享 (read_tsv 默认空首列 → 手工命名 region_id)
     existing <- as.data.frame(read_tsv(existing_depth, col_names = TRUE,
                                        show_col_types = FALSE, name_repair = "minimal"))
     newdata  <- as.data.frame(read_tsv(paste0(new_depth_tsv, ".gz"), col_names = TRUE,
@@ -477,16 +505,32 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
     }
     merged <- as.data.frame(existing)
     merged <- merged[!duplicated(merged$region_id), , drop = FALSE]
+    merged_base <- merged  # 所有模型共享的原始合并矩阵
 
-    # 按区域长度过滤
-    region_parts <- str_split(merged$region_id, ':', simplify = TRUE)
-    if (ncol(region_parts) >= 2) {
-        coords <- str_split(region_parts[, 2], '-', simplify = TRUE)
-        lens <- as.integer(coords[, 2]) - as.integer(coords[, 1]) + 1
-    } else {
-        lens <- rep(p$cutoff_align_len + 1, nrow(merged))
-    }
-    merged <- merged[lens > p$cutoff_align_len, , drop = FALSE]
+    # ---- 多模型预测循环 ----
+    all_model_results <- list()  # 收集各模型结果, 供 Phase 4 对比
+    for (mi in seq_along(top_models)) {
+        p <- top_models[[mi]]
+        model_name <- sprintf("model_%02d", mi)
+        model_dir  <- file.path(output_dir, model_name)
+        dir.create(model_dir, showWarnings = FALSE, recursive = TRUE)
+
+        message(sprintf("\n  ---- %s: cv(%d,%d) d=%d al=%d nn=%d eps=%.1f mp=%d ----",
+                model_name, p$cutoff_viroid_lo, p$cutoff_viroid_up,
+                p$cutoff_depth, p$cutoff_align_len,
+                p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts))
+
+        merged <- merged_base  # 每个模型从原始数据开始
+
+        # 按区域长度过滤
+        region_parts <- str_split(merged$region_id, ':', simplify = TRUE)
+        if (ncol(region_parts) >= 2) {
+            coords <- str_split(region_parts[, 2], '-', simplify = TRUE)
+            lens <- as.integer(coords[, 2]) - as.integer(coords[, 1]) + 1
+        } else {
+            lens <- rep(p$cutoff_align_len + 1, nrow(merged))
+        }
+        merged <- merged[lens > p$cutoff_align_len, , drop = FALSE]
 
     # 按 region_id 汇总 (只对数值列求和)
     merged_agg <- merged %>%
@@ -598,12 +642,12 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
                     row$isolate, row$predicted, row$confidence * 100,
                     row$mild_votes, row$severe_votes))
         }
-        write.csv(pred_output, file.path(output_dir, "level2_predictions.csv"), row.names = FALSE)
+        write.csv(pred_output, file.path(model_dir, "level2_predictions.csv"), row.names = FALSE)
     }
 
     # ---- 绘制 UMAP 预测图 ----
     if (exists("umap_final_res")) {
-        png(file.path(output_dir, "umap_prediction.png"), 1400, 1100, res = 200)
+        png(file.path(model_dir, "umap_prediction.png"), 1400, 1100, res = 200)
         plot_data <- data.frame(
             DIM1    = umap_final_res$layout[, 1],
             DIM2    = umap_final_res$layout[, 2],
@@ -630,7 +674,7 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
                  x = "UMAP DIM1", y = "UMAP DIM2")
         print(p)
         dev.off()
-        message(sprintf("  UMAP 图: %s", file.path(output_dir, "umap_prediction.png")))
+        message(sprintf("  UMAP 图: %s", file.path(model_dir, "umap_prediction.png")))
     }
 
     # ---- 图2: 新序列深度分布 ----
@@ -652,7 +696,7 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
             # 每个染色体单独画, 新序列叠在一起
             unique_chrs <- unique(chr_info)
             n_plots <- min(length(unique_chrs), 9)
-            png(file.path(output_dir, "depth_distribution.png"), 1600, 300 * n_plots, res = 150)
+            png(file.path(model_dir, "depth_distribution.png"), 1600, 300 * n_plots, res = 150)
             par(mfrow = c(n_plots, 1), mar = c(3, 4, 2, 1))
             for (cc in unique_chrs[seq_len(n_plots)]) {
                 ridx <- which(chr_info == cc)
@@ -667,14 +711,14 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
                 }
             }
             dev.off()
-            message(sprintf("  深度分布: %s", file.path(output_dir, "depth_distribution.png")))
+            message(sprintf("  深度分布: %s", file.path(model_dir, "depth_distribution.png")))
         }
     }
 
     # ---- 图3: 预测置信度柱状图 ----
     if (nrow(pred_output) > 0) {
         message("  绘制置信度柱状图...")
-        png(file.path(output_dir, "prediction_confidence.png"), 1200, 800, res = 180)
+        png(file.path(model_dir, "prediction_confidence.png"), 1200, 800, res = 180)
         po_sorted <- pred_output[order(pred_output$confidence, decreasing = TRUE), ]
         po_sorted$isolate_short <- substr(po_sorted$isolate, 1, 20)
         bar_cols <- ifelse(po_sorted$predicted == 'mild', '#4DAF4A',
@@ -688,7 +732,7 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
                fill = c('#4DAF4A','#E41A1C','#999999'), cex = 0.8, border = NA)
         abline(h = 50, lty = 2, col = 'gray60')
         dev.off()
-        message(sprintf("  置信度: %s", file.path(output_dir, "prediction_confidence.png")))
+        message(sprintf("  置信度: %s", file.path(model_dir, "prediction_confidence.png")))
     }
 
     # ---- 图4: 预测结果 Heatmap ----
@@ -716,7 +760,7 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
             annot_df <- data.frame(prediction = factor(col_annot, levels = c('mild','severe','uncertain','unknown')),
                                    row.names = new_cols)
 
-            png(file.path(output_dir, "prediction_heatmap.png"), 1800, 1400, res = 180)
+            png(file.path(model_dir, "prediction_heatmap.png"), 1800, 1400, res = 180)
             pheatmap::pheatmap(
                 log1p(hm_raw),
                 cluster_rows = hc_row, cluster_cols = hc_col,
@@ -728,9 +772,21 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
                 border_color = NA
             )
             dev.off()
-            message(sprintf("  Heatmap: %s", file.path(output_dir, "prediction_heatmap.png")))
+            message(sprintf("  Heatmap: %s", file.path(model_dir, "prediction_heatmap.png")))
         }
     }
+    # 收集模型结果供 Phase 4 对比
+    if (exists("pred_output") && nrow(pred_output) > 0) {
+        all_model_results[[mi]] <- list(
+            name   = model_name,
+            params = sprintf("cv(%d,%d) d=%d al=%d nn=%d eps=%.1f mp=%d",
+                             p$cutoff_viroid_lo, p$cutoff_viroid_up,
+                             p$cutoff_depth, p$cutoff_align_len,
+                             p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts),
+            pred   = pred_output
+        )
+    }
+}  # 多模型循环结束
 }  # Phase 3 结束
 
 # =============================================================================
@@ -765,10 +821,44 @@ if (nrow(level1) > 0) {
 cat("\n--------------------------------------------------------\n")
 cat("Level 2 — 预测结果\n")
 cat("--------------------------------------------------------\n")
-if (exists("pred_output") && nrow(pred_output) > 0) {
-    cat(sprintf("  总计: %d\n", nrow(pred_output)))
-    for (i in seq_len(nrow(pred_output))) {
-        r <- pred_output[i, ]
+if (length(all_model_results) > 0) {
+    cat(sprintf("  模型数: %d\n", length(all_model_results)))
+
+    # 多模型对比表
+    if (length(all_model_results) > 1) {
+        cat("\n  === 模型参数对比 ===\n")
+        for (mr in all_model_results) {
+            cat(sprintf("  %s: %s\n", mr$name, mr$params))
+        }
+        cat("\n  === 多模型预测对比 (m=mild, s=severe, u=uncertain) ===\n")
+        cat(sprintf("  %-32s", "Isolate"))
+        for (mr in all_model_results) cat(sprintf(" %6s", mr$name))
+        cat("\n")
+        # 合并所有 isolate
+        all_isos <- unique(unlist(lapply(all_model_results, function(x) x$pred$isolate)))
+        for (iso in sort(all_isos)) {
+            cat(sprintf("  %-32s", iso))
+            for (mr in all_model_results) {
+                row <- mr$pred[mr$pred$isolate == iso, ]
+                if (nrow(row) > 0) {
+                    lbl <- substr(row$predicted, 1, 1)
+                    conf <- row$confidence
+                    cat(sprintf(" %4s(%.0f%%)", toupper(lbl), conf * 100))
+                } else {
+                    cat("     -   ")
+                }
+            }
+            cat("\n")
+        }
+    }
+
+    # 第一个模型 (primary) 的详细结果
+    mr_primary <- all_model_results[[1]]
+    cat(sprintf("\n  === 主模型 (%s) 预测详情 ===\n", mr_primary$name))
+    cat(sprintf("  %s\n", mr_primary$params))
+    cat(sprintf("  总计: %d\n", nrow(mr_primary$pred)))
+    for (i in seq_len(nrow(mr_primary$pred))) {
+        r <- mr_primary$pred[i, ]
         cat(sprintf("  %-30s → %-8s (置信度 %.0f%%, mild:%d severe:%d/%d)\n",
                 r$isolate, r$predicted, r$confidence * 100,
                 r$mild_votes, r$severe_votes, r$n_valid))
@@ -798,6 +888,8 @@ sink()
 
 message(sprintf("\n报告: %s", report_path))
 message(sprintf("详情: %s/screening_results.csv", output_dir))
-if (exists("pred_output") && nrow(pred_output) > 0) {
-    message(sprintf("预测: %s/level2_predictions.csv", output_dir))
+if (length(all_model_results) > 0) {
+    for (mr in all_model_results) {
+        message(sprintf("模型 %s: %s/", mr$name, file.path(output_dir, mr$name)))
+    }
 }
