@@ -36,9 +36,16 @@ args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 9) {
     stop("用法: Rscript predict_pstvd.R <new.fa> <pstvd_db.fa> <metadata.tsv>
          <existing_depth.tsv.gz> <clustering_results_dir> <genome.fa>
-         <bt2_index> <output_dir> [identity_thr] [n_seeds] [n_cores] [threads] [consensus_seeds]
-         --multi N  用 Top N 共识参数集分别预测 (默认 1)
-         --blast <file>  用已有 BLAST 结果")
+         <bt2_index> <output_dir> [positional defaults...]
+
+  命名参数 (均可选,覆盖位置默认值):
+    --identity   PCT    一致度阈值 (默认 100.0)
+    --seeds      N      预测种子数 (默认 20)
+    --cores      N      并行核数 (默认 1)
+    --threads    N      Bowtie2 线程数 (默认 32)
+    --consensus-seeds N 共识投票种子数 (默认 20)
+    --multi      N     用 Top N 共识参数集预测 (默认 1)
+    --blast    FILE    用已有 BLAST 结果跳过 Phase1 比对")
 }
 
 new_fasta        <- args[1]
@@ -49,26 +56,31 @@ cluster_dir      <- args[5]        # 聚类结果目录 (替代单个 best_param
 genome_fa        <- args[6]
 bt2_index        <- args[7]
 output_dir       <- args[8]
+
+# ---- 命名参数解析 (--key value, 覆盖位置默认值) ----
+get_opt <- function(name, default, coerce = as.character) {
+    idx <- which(args == name)
+    if (length(idx) > 0 && idx < length(args)) {
+        coerce(args[idx + 1])
+    } else {
+        default
+    }
+}
+# 位置参数作为默认值
 identity_thr     <- if (length(args) >= 9)  as.numeric(args[9])  else 100.0
 n_seeds          <- if (length(args) >= 10) as.integer(args[10]) else 20
 n_cores          <- if (length(args) >= 11) as.integer(args[11]) else 1
 threads          <- if (length(args) >= 12) as.integer(args[12]) else 32
 consensus_seeds  <- if (length(args) >= 13) as.integer(args[13]) else 20
 
-# --multi N: 用 Top N 共识参数集分别预测
-multi_n <- 1
-multi_idx <- which(args == "--multi")
-if (length(multi_idx) > 0 && multi_idx < length(args)) {
-    multi_n <- as.integer(args[multi_idx + 1])
-    if (is.na(multi_n) || multi_n < 1) multi_n <- 1
-}
-
-# --blast <file> 可选：用已有 BLAST 结果跳过 Phase1 对齐
-blast_file <- NULL
-blast_idx <- which(args == "--blast")
-if (length(blast_idx) > 0 && blast_idx < length(args)) {
-    blast_file <- args[blast_idx + 1]
-}
+# 命名参数覆盖 (优先)
+identity_thr     <- get_opt("--identity",      identity_thr,     as.numeric)
+n_seeds          <- get_opt("--seeds",         n_seeds,          as.integer)
+n_cores          <- get_opt("--cores",         n_cores,          as.integer)
+threads          <- get_opt("--threads",       threads,          as.integer)
+consensus_seeds  <- get_opt("--consensus-seeds", consensus_seeds, as.integer)
+multi_n          <- get_opt("--multi",         1L,               as.integer)
+blast_file       <- get_opt("--blast",         NULL,             as.character)
 
 # 取脚本所在目录 (Rscript 兼容)
 scripts_dir <- dirname(normalizePath(
