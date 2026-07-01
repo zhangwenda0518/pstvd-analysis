@@ -886,6 +886,58 @@ cat(sprintf("  合计            : %d\n", nrow(screen_results)))
 
 sink()
 
+# ---- 多模型对比图 ----
+if (length(all_model_results) > 1) {
+    message("  绘制多模型对比图...")
+    png(file.path(output_dir, "model_comparison.png"), 1800, 1000, res = 180)
+    par(mfrow = c(1, 2), mar = c(8, 4, 3, 1))
+
+    # 左图: 各模型预测分布
+    dist_df <- do.call(rbind, lapply(all_model_results, function(mr) {
+        tbl <- table(mr$pred$predicted)
+        data.frame(model = mr$name, mild = sum(tbl['mild'], na.rm = TRUE),
+                   severe = sum(tbl['severe'], na.rm = TRUE),
+                   uncertain = sum(tbl['uncertain'], na.rm = TRUE))
+    }))
+    bar_mat <- t(as.matrix(dist_df[, c('mild','severe','uncertain')]))
+    colnames(bar_mat) <- dist_df$model
+    bp <- barplot(bar_mat, beside = FALSE, col = c('#4DAF4A','#E41A1C','#999999'),
+                  main = "各模型预测分布", ylab = "数量", las = 1,
+                  legend.text = c('Mild','Severe','Uncertain'),
+                  args.legend = list(cex = 0.8, border = NA))
+    text(bp, apply(bar_mat, 2, sum) / 2, labels = apply(bar_mat, 2, sum), pos = 3, cex = 0.8)
+
+    # 右图: 模型一致性矩阵
+    all_isos <- unique(unlist(lapply(all_model_results, function(x) x$pred$isolate)))
+    agree_mat <- matrix(NA, length(all_model_results), length(all_model_results))
+    rownames(agree_mat) <- sapply(all_model_results, `[[`, "name")
+    colnames(agree_mat) <- rownames(agree_mat)
+    for (i in seq_along(all_model_results)) {
+        for (j in seq_along(all_model_results)) {
+            pi <- all_model_results[[i]]$pred
+            pj <- all_model_results[[j]]$pred
+            common <- intersect(pi$isolate, pj$isolate)
+            if (length(common) > 0) {
+                agree <- sum(pi$predicted[match(common, pi$isolate)] ==
+                             pj$predicted[match(common, pj$isolate)])
+                agree_mat[i, j] <- agree / length(common) * 100
+            }
+        }
+    }
+    image(1:nrow(agree_mat), 1:ncol(agree_mat), agree_mat,
+          col = colorRampPalette(c("#67001F","#F4A582","#F7F7F7","#92C5DE","#053061"))(100),
+          xaxt = 'n', yaxt = 'n', main = "模型预测一致性 (%)",
+          xlab = "", ylab = "", zlim = c(0, 100))
+    axis(1, at = 1:nrow(agree_mat), labels = rownames(agree_mat), las = 2, cex.axis = 0.7)
+    axis(2, at = 1:ncol(agree_mat), labels = colnames(agree_mat), las = 1, cex.axis = 0.7)
+    for (i in 1:nrow(agree_mat))
+        for (j in 1:ncol(agree_mat))
+            text(i, j, sprintf("%.0f", agree_mat[i, j]), cex = 0.7)
+
+    dev.off()
+    message(sprintf("  对比图: %s", file.path(output_dir, "model_comparison.png")))
+}
+
 message(sprintf("\n报告: %s", report_path))
 message(sprintf("详情: %s/screening_results.csv", output_dir))
 if (length(all_model_results) > 0) {
