@@ -507,9 +507,14 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
     merged <- merged[!duplicated(merged$region_id), , drop = FALSE]
     merged_base <- merged  # 所有模型共享的原始合并矩阵
 
-    # ---- 多模型预测循环 ----
-    all_model_results <- list()  # 收集各模型结果, 供 Phase 4 对比
-    for (mi in seq_along(top_models)) {
+    # ---- 多模型预测 (支持并行) ----
+    # 内层种子并行度 / 外层模型并行度
+    inner_cores <- if (n_cores >= 4 && length(top_models) > 1)
+        max(2, n_cores %/% length(top_models)) else n_cores
+    outer_cores <- if (n_cores >= 8 && length(top_models) > 1)
+        min(length(top_models), n_cores %/% inner_cores) else 1
+
+    run_one_model <- function(mi) {
         p <- top_models[[mi]]
         model_name <- sprintf("model_%02d", mi)
         model_dir  <- file.path(output_dir, model_name)
@@ -586,7 +591,7 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
     }
 
     if (.Platform$OS.type == "unix" && n_cores > 1) {
-        pred_list <- parallel::mclapply(seq_len(n_seeds), run_seed, mc.cores = min(n_cores, n_seeds))
+        pred_list <- parallel::mclapply(seq_len(n_seeds), run_seed, mc.cores = min(inner_cores, n_seeds))
         all_preds <- do.call(cbind, pred_list)
     } else {
         message(sprintf("  串行模式: %d 种子", n_seeds))
@@ -777,7 +782,7 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
     }
     # 收集模型结果供 Phase 4 对比
     if (exists("pred_output") && nrow(pred_output) > 0) {
-        all_model_results[[mi]] <- list(
+        list(
             name   = model_name,
             params = sprintf("cv(%d,%d) d=%d al=%d nn=%d eps=%.1f mp=%d",
                              p$cutoff_viroid_lo, p$cutoff_viroid_up,
@@ -785,8 +790,20 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
                              p$umap__n_neighbor, p$dbscan__eps, p$dbscan__minpts),
             pred   = pred_output
         )
+    } else {
+        NULL
     }
-}  # 多模型循环结束
+}  # run_one_model 函数结束
+
+# 并行或顺序执行
+if (outer_cores > 1) {
+    message(sprintf("  并行 %d 模型 (各 %d 核)", length(top_models), inner_cores))
+    all_model_results <- parallel::mclapply(seq_along(top_models), run_one_model,
+                                            mc.cores = outer_cores)
+} else {
+    all_model_results <- lapply(seq_along(top_models), run_one_model)
+}
+all_model_results <- all_model_results[!sapply(all_model_results, is.null)]
 }  # Phase 3 结束
 
 # =============================================================================
