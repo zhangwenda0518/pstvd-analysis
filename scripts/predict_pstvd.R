@@ -582,12 +582,26 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
 
     message(sprintf("  过滤后: %d x %d", nrow(merged_mat), ncol(merged_mat)))
 
-    # 症状标签
+    # 症状标签 (metadata 实验标签优先 → prediction_table 共识标签)
     viroid_names <- colnames(merged_mat)
     true_labels <- rep('unknown', length(viroid_names))
     true_labels[viroid_names %in% meta$isolate[meta$symptom == "mild"]]     <- 'mild'
     true_labels[viroid_names %in% meta$isolate[meta$symptom == "moderate"]] <- 'moderate'
     true_labels[viroid_names %in% meta$isolate[meta$symptom == "severe"]]   <- 'severe'
+    # 无 metadata 的参考株 → 用 89 种子共识标签 (prediction_table.csv)
+    if (!is.null(pred_table)) {
+        for (i in seq_along(viroid_names)) {
+            if (true_labels[i] != 'unknown') next
+            pt_row <- pred_table[pred_table$viroid == viroid_names[i], ]
+            if (nrow(pt_row) > 0 && !is.na(pt_row$consensus[1])) {
+                true_labels[i] <- pt_row$consensus[1]
+            }
+        }
+    }
+    message(sprintf("  有标签: %d / %d (metadata %d + prediction %d)",
+                    sum(true_labels != 'unknown'), length(viroid_names),
+                    sum(true_labels[viroid_names %in% meta$isolate] != 'unknown'),
+                    sum(true_labels != 'unknown' & !viroid_names %in% meta$isolate)))
 
     # 多次种子预测
     estimate_label <- function(tl, pc) {
