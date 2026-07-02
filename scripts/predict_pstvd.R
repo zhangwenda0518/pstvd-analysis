@@ -66,12 +66,15 @@ get_opt <- function(name, default, coerce = as.character) {
         default
     }
 }
+# 过滤 --命名参数, 仅保留位置参数用于默认值
+first_named <- which(startsWith(args, "--"))[1]
+args_pos <- if (is.na(first_named)) args else args[1:(first_named - 1)]
 # 位置参数作为默认值
-identity_thr     <- if (length(args) >= 9)  as.numeric(args[9])  else 100.0
-n_seeds          <- if (length(args) >= 10) as.integer(args[10]) else 20
-n_cores          <- if (length(args) >= 11) as.integer(args[11]) else 1
-threads          <- if (length(args) >= 12) as.integer(args[12]) else 32
-consensus_seeds  <- if (length(args) >= 13) as.integer(args[13]) else 20
+identity_thr     <- if (length(args_pos) >= 9)  as.numeric(args_pos[9])  else 100.0
+n_seeds          <- if (length(args_pos) >= 10) as.integer(args_pos[10]) else 20
+n_cores          <- if (length(args_pos) >= 11) as.integer(args_pos[11]) else 1
+threads          <- if (length(args_pos) >= 12) as.integer(args_pos[12]) else 32
+consensus_seeds  <- if (length(args_pos) >= 13) as.integer(args_pos[13]) else 20
 
 # 命名参数覆盖 (优先)
 identity_thr     <- get_opt("--identity",      identity_thr,     as.numeric)
