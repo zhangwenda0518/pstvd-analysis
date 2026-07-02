@@ -666,12 +666,28 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
         if (n_v == 0) next
         mv <- sum(preds == 'mild')
         sv <- sum(preds == 'severe')
-        consensus <- if (mv > sv) 'mild' else if (sv > mv) 'severe' else 'uncertain'
+        n_uk <- sum(preds == 'unknown')
+
+        # 区分无信号 vs 种子分歧
+        if (mv + sv == 0) {
+            consensus <- 'no_signal'
+            reason <- sprintf('所有种子判unknown(总%d/%d)', n_uk, n_v)
+        } else if (mv == sv) {
+            consensus <- 'ambiguous'
+            reason <- sprintf('种子平票 mild=%d severe=%d/%d', mv, sv, n_v)
+        } else {
+            consensus <- if (mv > sv) 'mild' else 'severe'
+            reason <- sprintf('投票 mild=%d severe=%d/%d', mv, sv, n_v)
+        }
+        conf <- if (mv + sv > 0) max(mv, sv) / (mv + sv) else 0
+
         vid_full <- if (vid %in% names(id_map)) id_map[[vid]] else vid
         pred_output <- rbind(pred_output, data.frame(
             isolate = vid_full, predicted = consensus,
-            confidence = max(mv, sv) / n_v,
-            mild_votes = mv, severe_votes = sv, n_valid = n_v,
+            confidence = conf,
+            mild_votes = mv, severe_votes = sv,
+            unknown_votes = n_uk, n_valid = n_v,
+            reason = reason,
             stringsAsFactors = FALSE
         ))
     }
@@ -680,9 +696,9 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
         cat("\n  Level 2 预测结果:\n")
         for (i in seq_len(nrow(pred_output))) {
             row <- pred_output[i, ]
-            cat(sprintf("    %-30s → %-8s (置信度 %.0f%%, mild:%d severe:%d)\n",
+            cat(sprintf("    %-30s → %-10s (置信度 %.0f%%, mild:%d severe:%d unknown:%d) %s\n",
                     row$isolate, row$predicted, row$confidence * 100,
-                    row$mild_votes, row$severe_votes))
+                    row$mild_votes, row$severe_votes, row$unknown_votes, row$reason))
         }
         write.csv(pred_output, file.path(model_dir, "level2_predictions.csv"), row.names = FALSE)
     }
@@ -840,15 +856,24 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
     }
 }  # run_one_model 函数结束
 
-# 并行或顺序执行
+# 并行或顺序执行 (并行时子进程不用 message, 父进程汇总)
 if (outer_cores > 1) {
     message(sprintf("  并行 %d 模型 (各 %d 核)", length(top_models), inner_cores))
     all_model_results <- parallel::mclapply(seq_along(top_models), run_one_model,
-                                            mc.cores = outer_cores)
+                                            mc.cores = outer_cores,
+                                            mc.preschedule = TRUE)
 } else {
     all_model_results <- lapply(seq_along(top_models), run_one_model)
 }
 all_model_results <- all_model_results[!sapply(all_model_results, is.null)]
+# 汇总各模型预测统计
+for (mr in all_model_results) {
+    tbl <- table(mr$pred$predicted)
+    cat(sprintf("  %s (%s):\n", mr$name, mr$params))
+    for (lbl in names(tbl)) {
+        cat(sprintf("    %-12s %d\n", paste0(lbl, ":"), tbl[lbl]))
+    }
+}
 }  # Phase 3 结束
 
 # =============================================================================
@@ -914,16 +939,16 @@ if (length(all_model_results) > 0) {
         }
     }
 
-    # 第一个模型 (primary) 的详细结果
-    mr_primary <- all_model_results[[1]]
-    cat(sprintf("\n  === 主模型 (%s) 预测详情 ===\n", mr_primary$name))
-    cat(sprintf("  %s\n", mr_primary$params))
-    cat(sprintf("  总计: %d\n", nrow(mr_primary$pred)))
-    for (i in seq_len(nrow(mr_primary$pred))) {
-        r <- mr_primary$pred[i, ]
-        cat(sprintf("  %-30s → %-8s (置信度 %.0f%%, mild:%d severe:%d/%d)\n",
-                r$isolate, r$predicted, r$confidence * 100,
-                r$mild_votes, r$severe_votes, r$n_valid))
+    # 每个模型的详细预测结果
+    for (mr in all_model_results) {
+        cat(sprintf("\n  === %s: %s ===\n", mr$name, mr$params))
+        cat(sprintf("  总计: %d\n", nrow(mr$pred)))
+        for (i in seq_len(nrow(mr$pred))) {
+            r <- mr$pred[i, ]
+            cat(sprintf("  %-30s → %-10s (置信度 %.0f%%, mild:%d severe:%d unknown:%d) %s\n",
+                    r$isolate, r$predicted, r$confidence * 100,
+                    r$mild_votes, r$severe_votes, r$unknown_votes, r$reason))
+        }
     }
 } else {
     cat("  无\n")
