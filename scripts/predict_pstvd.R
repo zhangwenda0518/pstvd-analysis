@@ -201,7 +201,11 @@ if (!is.null(blast_file) && file.exists(blast_file) && file.info(blast_file)$siz
     if (!is.null(pred_table)) {
         for (i in seq_len(nrow(blast))) {
             if (!is.na(blast$meta_label[i]) && blast$meta_label[i] != "unknown") next
-            p <- pred_table$consensus[pred_table$viroid == blast$sseqid[i]]
+            # BLAST sseqid 带版本号 (.1), pred_table viroid 无版本号
+            sid <- blast$sseqid[i]
+            p <- pred_table$consensus[pred_table$viroid == sid]
+            if (length(p) == 0 || is.na(p[1]))
+                p <- pred_table$consensus[pred_table$viroid == sub("\\..*", "", sid)]
             if (length(p) > 0 && !is.na(p[1])) blast$pred_label[i] <- p[1]
         }
     }
@@ -917,7 +921,7 @@ if (length(all_model_results) > 0) {
         for (mr in all_model_results) {
             cat(sprintf("  %s: %s\n", mr$name, mr$params))
         }
-        cat("\n  === 多模型预测对比 (m=mild, s=severe, u=uncertain) ===\n")
+        cat("\n  === 多模型预测对比 (S=severe M=mild N=no_signal A=ambiguous) ===\n")
         cat(sprintf("  %-32s", "Isolate"))
         for (mr in all_model_results) cat(sprintf(" %6s", mr$name))
         cat("\n")
