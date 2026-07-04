@@ -212,9 +212,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     # ---- 输出 ----
     g = p.add_argument_group("输出配置")
     g.add_argument("--output-dir", default="./results",
-                   help="结果输出目录 (默认: ./results)")
-    g.add_argument("--data-dir", default="./data",
-                   help="数据目录 (默认: ./data)")
+                   help="结果输出目录 (默认: ./results; 中间文件放 ./data)")
     g.add_argument("--logs-dir", default="./logs",
                    help="日志目录 (默认: ./logs)")
 
@@ -283,7 +281,7 @@ class Paths:
     """根据参数生成所有路径。"""
 
     def __init__(self, args: argparse.Namespace):
-        self.data_dir = Path(args.data_dir).resolve()
+        self.data_dir = (Path(__file__).resolve().parent / "data")
         self.output_dir = Path(args.output_dir).resolve()
         self.logs_dir = Path(args.logs_dir).resolve()
         self.genome_dir = self.data_dir / "genome"
