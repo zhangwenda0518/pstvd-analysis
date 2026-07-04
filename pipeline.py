@@ -281,8 +281,8 @@ class Paths:
     """根据参数生成所有路径。"""
 
     def __init__(self, args: argparse.Namespace):
-        self.data_dir = (Path(__file__).resolve().parent / "data")
         self.output_dir = Path(args.output_dir).resolve()
+        self.data_dir = self.output_dir / "data"
         self.logs_dir = Path(args.logs_dir).resolve()
         self.genome_dir = self.data_dir / "genome"
         self.pstvd_dir = self.data_dir / "pstvd"
