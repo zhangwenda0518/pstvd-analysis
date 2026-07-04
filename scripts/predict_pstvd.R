@@ -33,31 +33,28 @@ suppressPackageStartupMessages({
 # 参数
 # =============================================================================
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 9) {
-    stop("用法: Rscript predict_pstvd.R <new.fa> <pstvd_db.fa> <metadata.tsv>
-         <existing_depth.tsv.gz> <clustering_results_dir> <genome.fa>
-         <bt2_index> <output_dir> [positional defaults...]
+if (length(args) < 2) {
+    stop("用法: Rscript predict_pstvd.R <new.fa> [output_dir]
 
-  命名参数 (均可选,覆盖位置默认值):
+  核心参数:
+    --model-dir   PATH  训练结果目录 (自动推导其他路径)
+    --pstvd-db    PATH  PSTVd 参考 FASTA [默认: data/pstvd/PSTVd300.fa]
+    --metadata    PATH  症状标签 TSV      [默认: data/metadata.tsv]
+  单独覆盖 (--model-dir 已自动推导,也可手动指定):
+    --existing-depth PATH  现有深度矩阵
+    --cluster-dir   PATH  聚类结果目录
+    --genome-fa     PATH  宿主基因组 FASTA
+    --bt2-index     PATH  Bowtie2 索引前缀
+  预测参数:
     --identity   PCT    一致度阈值 (默认 100.0)
     --seeds      N      预测种子数 (默认 20)
     --cores      N      并行核数 (默认 1)
     --threads    N      Bowtie2 线程数 (默认 32)
     --consensus-seeds N 共识投票种子数 (默认 20)
-    --multi      N     用 Top N 共识参数集预测 (默认 1)
-    --blast    FILE    用已有 BLAST 结果跳过 Phase1 比对")
-}
+    --multi      N      多模型数 (默认 1)
+    --blast     FILE   用已有 BLAST 结果")
 
-new_fasta        <- args[1]
-pstvd_db         <- args[2]
-metadata_tsv     <- args[3]
-existing_depth   <- args[4]
-cluster_dir      <- args[5]        # 聚类结果目录 (替代单个 best_params.tsv)
-genome_fa        <- args[6]
-bt2_index        <- args[7]
-output_dir       <- args[8]
-
-# ---- 命名参数解析 (--key value, 覆盖位置默认值) ----
+# ---- 命名参数解析 ----
 get_opt <- function(name, default, coerce = as.character) {
     idx <- which(args == name)
     if (length(idx) > 0 && idx < length(args)) {
@@ -66,30 +63,83 @@ get_opt <- function(name, default, coerce = as.character) {
         default
     }
 }
-# 过滤 --命名参数, 仅保留位置参数用于默认值
+# 过滤 --命名参数, 取位置参数
 first_named <- which(startsWith(args, "--"))[1]
 args_pos <- if (is.na(first_named)) args else args[1:(first_named - 1)]
-# 位置参数作为默认值
-identity_thr     <- if (length(args_pos) >= 9)  as.numeric(args_pos[9])  else 100.0
-n_seeds          <- if (length(args_pos) >= 10) as.integer(args_pos[10]) else 20
-n_cores          <- if (length(args_pos) >= 11) as.integer(args_pos[11]) else 1
-threads          <- if (length(args_pos) >= 12) as.integer(args_pos[12]) else 32
-consensus_seeds  <- if (length(args_pos) >= 13) as.integer(args_pos[13]) else 20
 
-# 命名参数覆盖 (优先)
-identity_thr     <- get_opt("--identity",      identity_thr,     as.numeric)
-n_seeds          <- get_opt("--seeds",         n_seeds,          as.integer)
-n_cores          <- get_opt("--cores",         n_cores,          as.integer)
-threads          <- get_opt("--threads",       threads,          as.integer)
-consensus_seeds  <- get_opt("--consensus-seeds", consensus_seeds, as.integer)
-multi_n          <- get_opt("--multi",         1L,               as.integer)
-blast_file       <- get_opt("--blast",         NULL,             as.character)
+# 位置参数 (只需2个)
+new_fasta  <- args_pos[1]
+output_dir <- if (length(args_pos) >= 2) args_pos[2] else "results/predict"
 
-# 取脚本所在目录 (Rscript 兼容)
+# 脚本根目录
 scripts_dir <- dirname(normalizePath(
     sub("--file=", "", commandArgs(trailingOnly = FALSE)[grep("--file=", commandArgs(trailingOnly = FALSE))])
 ))
 if (is.na(scripts_dir) || scripts_dir == ".") scripts_dir <- "scripts"
+project_root <- dirname(scripts_dir)  # goji_pipeline/
+
+# 默认路径 (脚本同仓库)
+pstvd_db     <- file.path(project_root, "data/pstvd/PSTVd300.fa")
+metadata_tsv <- file.path(project_root, "data/metadata.tsv")
+
+# --model-dir: 自动推导训练产物路径
+model_dir <- get_opt("--model-dir", NULL)
+if (!is.null(model_dir)) {
+    # 扫描 data 子目录找 depth 矩阵
+    data_subdirs <- list.dirs(file.path(model_dir, "data"), recursive = FALSE, full.names = FALSE)
+    depth_glob   <- grep("_L\\d+", data_subdirs, value = TRUE)
+    if (length(depth_glob) > 0) {
+        batch_name <- depth_glob[1]
+        existing_depth_def <- file.path(model_dir, "data", batch_name,
+                                        "depth/bowtie2.300.depth.tsv.gz")
+        if (file.exists(existing_depth_def)) {
+            existing_depth <- existing_depth_def
+        }
+    }
+    cluster_dir_def <- file.path(model_dir, "clustering")
+    if (dir.exists(cluster_dir_def)) cluster_dir <- cluster_dir_def
+
+    # 基因组: 从 model-dir/data/genome/ 找 .fa
+    genome_files <- list.files(file.path(model_dir, "data/genome"),
+                               pattern = "\\.fa$|\\.fasta$|\\.fna$",
+                               full.names = TRUE)
+    if (length(genome_files) > 0) genome_fa <- genome_files[1]
+    # Bowtie2 索引: 扫描 index/ 目录找 .1.bt2 文件, 取前缀
+    bt2_dir <- file.path(model_dir, "data/genome/index")
+    if (dir.exists(bt2_dir)) {
+        bt2_files <- list.files(bt2_dir, pattern = "\\.1\\.bt2$", full.names = TRUE)
+        if (length(bt2_files) > 0) {
+            bt2_index <- sub("\\.1\\.bt2$", "", bt2_files[1])
+        }
+    }
+}
+
+# 单独覆盖 (优先级高于 --model-dir 自动推导)
+existing_depth <- get_opt("--existing-depth", if (exists("existing_depth")) existing_depth else NULL)
+cluster_dir    <- get_opt("--cluster-dir",    if (exists("cluster_dir"))    cluster_dir    else NULL)
+genome_fa      <- get_opt("--genome-fa",      if (exists("genome_fa"))      genome_fa      else NULL)
+bt2_index      <- get_opt("--bt2-index",      if (exists("bt2_index"))      bt2_index      else NULL)
+pstvd_db       <- get_opt("--pstvd-db",       pstvd_db)
+metadata_tsv   <- get_opt("--metadata",       metadata_tsv)
+
+# 验证必选路径
+if (is.null(existing_depth) || !file.exists(existing_depth))
+    stop("缺少现有深度矩阵。请用 --model-dir 或 --existing-depth 指定")
+if (is.null(cluster_dir) || !dir.exists(cluster_dir))
+    stop("缺少聚类结果目录。请用 --model-dir 或 --cluster-dir 指定")
+if (is.null(genome_fa) || !file.exists(genome_fa))
+    stop("缺少基因组 FASTA。请用 --model-dir 或 --genome-fa 指定")
+if (is.null(bt2_index) || !file.exists(paste0(bt2_index, ".1.bt2")))
+    stop("缺少 Bowtie2 索引。请用 --model-dir 或 --bt2-index 指定")
+
+# 预测参数
+identity_thr     <- get_opt("--identity",      100.0,  as.numeric)
+n_seeds          <- get_opt("--seeds",         20L,    as.integer)
+n_cores          <- get_opt("--cores",         1L,     as.integer)
+threads          <- get_opt("--threads",       32L,    as.integer)
+consensus_seeds  <- get_opt("--consensus-seeds", 20L,  as.integer)
+multi_n          <- get_opt("--multi",         1L,     as.integer)
+blast_file       <- get_opt("--blast",         NULL,   as.character)
 
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
