@@ -33,10 +33,12 @@ suppressPackageStartupMessages({
 # 参数
 # =============================================================================
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 2) {
-    stop("用法: Rscript predict_pstvd.R <new.fa> [output_dir]
+if (length(args) < 1) {
+    stop("用法: Rscript predict_pstvd.R [--input-fasta <new.fa>] [--output <dir>]
 
   核心参数:
+    --input-fasta FILE  新序列 FASTA (也可作为第1个位置参数)
+    --output      DIR   输出目录          [默认: results/predict]
     --model-dir   PATH  训练结果目录 (自动推导其他路径)
     --pstvd-db    PATH  PSTVd 参考 FASTA [默认: data/pstvd/PSTVd300.fa]
     --metadata    PATH  症状标签 TSV      [默认: data/metadata.tsv]
@@ -67,9 +69,10 @@ get_opt <- function(name, default, coerce = as.character) {
 first_named <- which(startsWith(args, "--"))[1]
 args_pos <- if (is.na(first_named)) args else args[1:(first_named - 1)]
 
-# 位置参数 (只需2个)
-new_fasta  <- args_pos[1]
-output_dir <- if (length(args_pos) >= 2) args_pos[2] else "results/predict"
+# 位置参数 (向后兼容: args_pos[1]=new.fa, args_pos[2]=output_dir)
+new_fasta  <- get_opt("--input-fasta", if (length(args_pos) >= 1) args_pos[1] else NULL)
+output_dir <- get_opt("--output", if (length(args_pos) >= 2) args_pos[2] else "results/predict")
+if (is.null(new_fasta) || is.na(new_fasta)) stop("请指定新序列 FASTA: --input-fasta <file> 或作为第1个参数")
 
 # 脚本根目录
 scripts_dir <- dirname(normalizePath(
