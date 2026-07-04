@@ -296,22 +296,37 @@ write.csv(screen_results, file.path(output_dir, "screening_results.csv"), row.na
 }  # 关闭 Phase 1 skip guard
 
 # =============================================================================
-# Phase 2: 生成深度矩阵 (仅 Level 2)
+# Phase 2: 生成深度矩阵 (Level 1 验证 + Level 2 预测)
 # =============================================================================
 new_depth_tsv <- file.path(output_dir, "new_depth.tsv")
 new_depth_gz  <- paste0(new_depth_tsv, ".gz")
+phase2_n <- nrow(level1) + nrow(level2)  # 应生成的序列总数
 
 if (file.exists(new_depth_gz)) {
-    # Phase 2 已完成 → 跳过
-    cat("\n")
-    message(sprintf("║  Phase 2: [跳过] 深度矩阵已存在 (%s)  ║", basename(new_depth_gz)))
-} else if (nrow(level2) == 0) {
+    # 检查列数是否匹配 (防止新增 Level 1 时跳过重建)
+    tmp <- read.table(new_depth_gz, header = FALSE, nrows = 1, sep = "\t", stringsAsFactors = FALSE)
+    existing_cols <- ncol(tmp) - 1  # 减掉无名首列
+    if (existing_cols >= phase2_n) {
+        cat("\n")
+        message(sprintf("║  Phase 2: [跳过] 深度矩阵已存在 (%s, %d列)  ║",
+                        basename(new_depth_gz), existing_cols))
+    } else {
+        message(sprintf("  ⚠ 深度矩阵列数不足 (%d < %d), 重建...", existing_cols, phase2_n))
+        file.remove(new_depth_gz)
+        file.remove(new_depth_tsv)
+    }
+}
+if (!file.exists(new_depth_gz) && phase2_n == 0) {
+    message("\n  全部直接继承, 跳过预测。")
+} else if (!file.exists(new_depth_gz)) {
     message("\n  全部直接继承, 跳过预测。")
 } else {
     cat("\n")
     message("╔══════════════════════════════════════╗")
     message("║  Phase 2: 生成深度矩阵              ║")
     message("╚══════════════════════════════════════╝")
+    message(sprintf("  Level1(验证): %d + Level2(预测): %d = %d 条",
+                    nrow(level1), nrow(level2), phase2_n))
 
     iso_dir   <- file.path(output_dir, "isolates")
     fastq_dir <- file.path(output_dir, "fastq")
@@ -319,10 +334,14 @@ if (file.exists(new_depth_gz)) {
     depth_dir <- file.path(output_dir, "depth")
     for (d in c(iso_dir, fastq_dir, bam_dir, depth_dir)) dir.create(d, showWarnings = FALSE)
 
-    # 提取 Level 2 序列
+    # 提取 Level 1 + Level 2 序列 (全部写入深度矩阵, Level1作验证)
     level2_fa <- file.path(output_dir, "level2.fasta")
-    level2_idx <- which(screen_results$decision == "need_prediction")
-    writeXStringSet(new_seqs[level2_idx], level2_fa)
+    phase2_idx <- which(screen_results$decision %in%
+        c("need_prediction") | grepl("^inherit_", screen_results$decision))
+    writeXStringSet(new_seqs[phase2_idx], level2_fa)
+    # 记录 Level 1 标签映射 (供 Phase 3 投票用)
+    level1_inherited <- screen_results[grepl("^inherit_", screen_results$decision),
+        c("query_id", "decision"), drop = FALSE]
 
     # 拆分
     current_fh <- NULL
@@ -400,8 +419,9 @@ if (file.exists(new_depth_gz)) {
     if (file.exists(orig_acn)) {
         file.copy(orig_acn, temp_acn, overwrite = TRUE)
     }
-    # 追加新序列 ID (每个一行: ID\tID)
-    cat(paste0(level2$query_id, "\t", level2$query_id, "\n"),
+    # 追加新序列 ID (Level 1 + Level 2, 每个一行: ID\tID)
+    new_phase2_ids <- c(level1$query_id, level2$query_id)
+    cat(paste0(new_phase2_ids, "\t", new_phase2_ids, "\n"),
         file = temp_acn, append = TRUE, sep = "")
 
     ret <- system2("python3", c(
@@ -602,10 +622,25 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
             }
         }
     }
-    message(sprintf("  有标签: %d / %d (metadata %d + prediction %d)",
+    # Level 1 继承标签 (BLAST高置信, Phase 3 中作验证)
+    if (exists("level1_inherited") && nrow(level1_inherited) > 0) {
+        l1_full <- sub(" .*", "", level1_inherited$query_id)
+        l1_trunc <- sapply(strsplit(l1_full, "\\."), `[`, 1)  # 去版本号
+        for (i in seq_along(l1_trunc)) {
+            vname <- l1_trunc[i]
+            if (vname %in% viroid_names && true_labels[viroid_names == vname] == 'unknown') {
+                lbl <- gsub("^inherit_", "", level1_inherited$decision[i])
+                if (lbl %in% c('mild', 'severe', 'moderate')) {
+                    true_labels[viroid_names == vname] <- lbl
+                }
+            }
+        }
+    }
+    message(sprintf("  有标签: %d / %d (metadata %d + prediction %d + Level1 %d)",
                     sum(true_labels != 'unknown'), length(viroid_names),
                     sum(true_labels[viroid_names %in% meta$isolate] != 'unknown'),
-                    sum(true_labels != 'unknown' & !viroid_names %in% meta$isolate)))
+                    sum(true_labels != 'unknown' & !viroid_names %in% meta$isolate & !viroid_names %in% l1_trunc),
+                    sum(true_labels != 'unknown' & viroid_names %in% l1_trunc)))
 
     # 多次种子预测
     estimate_label <- function(tl, pc) {
@@ -659,8 +694,15 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
     umap_final_res <- vis$umap
     db_final_res   <- vis$db
 
-    # 汇总 Level 2 结果
+    # 汇总 (Level 1 验证 + Level 2 预测)
+    l1_trunc_set <- character(0)
+    if (exists("level1_inherited") && nrow(level1_inherited) > 0) {
+        l1_trunc_set <- sapply(strsplit(sub(" .*", "", level1_inherited$query_id), "\\."), `[`, 1)
+    }
+    l2_trunc_set <- sapply(strsplit(sub(" .*", "", level2$query_id), "\\."), `[`, 1)
+
     pred_output <- data.frame(stringsAsFactors = FALSE)
+    val_output  <- data.frame(stringsAsFactors = FALSE)
     for (vid in new_ids) {
         idx <- which(viroid_names == vid)
         if (length(idx) == 0) next
@@ -672,7 +714,6 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
         sv <- sum(preds == 'severe')
         n_uk <- sum(preds == 'unknown')
 
-        # 区分无信号 vs 种子分歧
         if (mv + sv == 0) {
             consensus <- 'no_signal'
             reason <- sprintf('所有种子判unknown(总%d/%d)', n_uk, n_v)
@@ -686,16 +727,49 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
         conf <- if (mv + sv > 0) max(mv, sv) / (mv + sv) else 0
 
         vid_full <- if (vid %in% names(id_map)) id_map[[vid]] else vid
-        pred_output <- rbind(pred_output, data.frame(
-            isolate = vid_full, predicted = consensus,
-            confidence = conf,
-            mild_votes = mv, severe_votes = sv,
-            unknown_votes = n_uk, n_valid = n_v,
-            reason = reason,
-            stringsAsFactors = FALSE
-        ))
+
+        if (vid %in% l1_trunc_set) {
+            # Level 1: 验证
+            inherited_lbl <- gsub("^inherit_", "",
+                level1_inherited$decision[match(vid, l1_trunc_set)])
+            val_output <- rbind(val_output, data.frame(
+                isolate = vid_full, inherited = inherited_lbl,
+                predicted = consensus, confidence = conf,
+                mild_votes = mv, severe_votes = sv,
+                unknown_votes = n_uk, n_valid = n_v,
+                match = ifelse(consensus == inherited_lbl, '✓', '✗'),
+                reason = reason,
+                stringsAsFactors = FALSE
+            ))
+        } else {
+            # Level 2: 预测
+            pred_output <- rbind(pred_output, data.frame(
+                isolate = vid_full, predicted = consensus,
+                confidence = conf,
+                mild_votes = mv, severe_votes = sv,
+                unknown_votes = n_uk, n_valid = n_v,
+                reason = reason,
+                stringsAsFactors = FALSE
+            ))
+        }
     }
 
+    # Level 1 验证结果
+    if (nrow(val_output) > 0) {
+        cat(sprintf("\n  Level 1 验证 (继承标签 vs 聚类投票):\n"))
+        for (i in seq_len(nrow(val_output))) {
+            row <- val_output[i, ]
+            cat(sprintf("    %-30s 继承:%-8s → %-10s (%.0f%%) %s %s\n",
+                    row$isolate, row$inherited, row$predicted,
+                    row$confidence * 100, row$match, row$reason))
+        }
+        n_match <- sum(val_output$match == '✓')
+        cat(sprintf("  验证一致率: %d/%d (%.0f%%)\n", n_match, nrow(val_output),
+                    n_match / nrow(val_output) * 100))
+        write.csv(val_output, file.path(model_dir, "level1_validation.csv"), row.names = FALSE)
+    }
+
+    # Level 2 预测结果
     if (nrow(pred_output) > 0) {
         cat("\n  Level 2 预测结果:\n")
         for (i in seq_len(nrow(pred_output))) {
