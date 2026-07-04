@@ -199,11 +199,14 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
                    help="本地已有基因组 FASTA 文件路径（跳过下载）")
 
     # ---- PSTVd ----
+    PROJECT_ROOT = Path(__file__).resolve().parent
     g = p.add_argument_group("PSTVd 数据")
-    g.add_argument("--pstvd-fa", required=True,
-                   help="PSTVd 序列 FASTA 文件路径")
-    g.add_argument("--pstvd-acn", required=True,
-                   help="PSTVd ID 映射文件路径 (.acn)")
+    g.add_argument("--pstvd-fa",
+                   default=str(PROJECT_ROOT / "data" / "pstvd" / "PSTVd300.fa"),
+                   help=f"PSTVd 序列 FASTA 文件路径 (默认: data/pstvd/PSTVd300.fa)")
+    g.add_argument("--pstvd-acn",
+                   default=str(PROJECT_ROOT / "data" / "pstvd" / "PSTVd300.acn"),
+                   help=f"PSTVd ID 映射文件 (.acn) (默认: data/pstvd/PSTVd300.acn)")
 
     # ---- 输出 ----
     g = p.add_argument_group("输出配置")
@@ -258,9 +261,10 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 
     # ---- 症状标签 ----
     g = p.add_argument_group("症状标签 (Stage 6/7)")
-    g.add_argument("--metadata", default=None,
-                   help="症状标签 TSV 文件 (isolate, symptom, reference)。"
-                        "不指定则使用论文 Table 1 硬编码标签")
+    g.add_argument("--metadata",
+                   default=str(PROJECT_ROOT / "data" / "metadata.tsv"),
+                   help=f"症状标签 TSV 文件 (isolate, symptom, reference)。"
+                        f"(默认: data/metadata.tsv)")
 
     return p.parse_args(argv)
 
