@@ -191,10 +191,11 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 
     # ---- 基因组 ----
     g = p.add_argument_group("基因组配置")
-    g.add_argument("--genome-acc", required=True,
-                   help="NCBI Assembly accession (如 GCA_019175385.1)")
+    g.add_argument("--genome-acc", default=None,
+                   help="NCBI Assembly accession (如 GCA_019175385.1)"
+                        " [已有 --genome-fa 时可不指定]")
     g.add_argument("--genome-name", required=True,
-                   help="基因组简称，用于文件命名 (如 Lbarbarum)")
+                   help="基因组简称，用于文件命名 (如 ningxia)")
     g.add_argument("--genome-fa", default=None,
                    help="本地已有基因组 FASTA 文件路径（跳过下载）")
 
@@ -266,7 +267,13 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
                    help=f"症状标签 TSV 文件 (isolate, symptom, reference)。"
                         f"(默认: data/metadata.tsv)")
 
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+
+    # 验证: 必要时 genome-acc 或 genome-fa
+    if not args.genome_fa and not args.genome_acc:
+        p.error("需要 --genome-acc (NCBI下载) 或 --genome-fa (本地基因组)")
+
+    return args
 
 
 # =============================================================================
@@ -375,6 +382,10 @@ def stage_0_download_genome(args: argparse.Namespace, paths: Paths):
     # --- 下载 ---
     if paths.genome_fa.exists():
         log.info("基因组已存在: %s", paths.genome_fa)
+    elif not args.genome_acc:
+        die("基因组文件不存在且未指定 --genome-acc, 无法下载。"
+            f"\n  期望路径: {paths.genome_fa}"
+            "\n  请提供 --genome-acc 或 --genome-fa")
     else:
         log.info("从 NCBI 下载基因组: %s", args.genome_acc)
         acc = args.genome_acc
