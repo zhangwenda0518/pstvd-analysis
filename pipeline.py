@@ -500,8 +500,38 @@ def stage_1_prepare_pstvd(args: argparse.Namespace, paths: Paths):
 
 
 # =============================================================================
-# Stage 2: 生成模拟 FASTQ
+# Stage 2: 生成模拟 FASTQ (并行)
 # =============================================================================
+def _generate_one_fastq(vid_path, fastq_dir, read_lens, read_len_type, coverage, python_bin, generate_py):
+    """单个分离株: 4读长生成 → 合并 → gzip"""
+    vid_name = vid_path.name.replace(".fa", "")
+    fq_gz = Path(fastq_dir) / f"{vid_name}.fastq.gz"
+    if fq_gz.exists():
+        return (vid_name, "skipped")
+
+    temp_files = []
+    for rlen in read_lens:
+        tmp_fq = Path(fastq_dir) / f"{vid_name}_L{rlen}.fastq"
+        temp_files.append(tmp_fq)
+        env = os.environ.copy()
+        env["PSTVD_COVERAGE"] = str(coverage)
+        subprocess.run(
+            [python_bin, str(generate_py), str(vid_path), str(tmp_fq),
+             str(rlen), read_len_type],
+            env=env, check=True, capture_output=True,
+        )
+
+    fq_path = Path(fastq_dir) / f"{vid_name}.fastq"
+    with open(fq_path, "w") as outfh:
+        for tmp_fq in temp_files:
+            with open(tmp_fq) as infh:
+                outfh.write(infh.read())
+            tmp_fq.unlink()
+
+    subprocess.run(["gzip", "-f", str(fq_path)], check=True)
+    return (vid_name, "done")
+
+
 def stage_2_generate_fastq(args: argparse.Namespace, paths: Paths):
     log.info("=== Stage 2: 生成模拟 FASTQ reads ===")
 
@@ -511,48 +541,37 @@ def stage_2_generate_fastq(args: argparse.Namespace, paths: Paths):
     isolates_dir = paths.pstvd_dir / "isolates"
 
     fa_files = sorted(isolates_dir.glob("*.fa"))
-    total = 0
+    n_total = len(fa_files)
+    n_workers = min(args.cluster_cores or 8, n_total, os.cpu_count() or 8)
+    log.info("并行 %d 进程, %d 个分离株", n_workers, n_total)
 
-    for vid_path in fa_files:
-        vid_name = vid_path.stem
-        fq_path = paths.fastq_dir / f"{vid_name}.fastq"
-        if (paths.fastq_dir / f"{vid_name}.fastq.gz").exists():
-            continue
+    tasks = [(p, paths.fastq_dir, read_lens, args.read_len_type,
+              args.coverage, paths.python, generate_py) for p in fa_files]
 
-        # 对每个读长分别生成
-        temp_files = []
-        for rlen in read_lens:
-            tmp_fq = paths.fastq_dir / f"{vid_name}_L{rlen}.fastq"
-            temp_files.append(tmp_fq)
-            # generate_fastq.py 内部硬编码了 x_coverage=10000，
-            # 这里通过环境变量覆盖以支持 --coverage 参数
-            env = os.environ.copy()
-            env["PSTVD_COVERAGE"] = str(args.coverage)
-            run([
-                paths.python, str(generate_py),
-                str(vid_path), str(tmp_fq),
-                str(rlen), args.read_len_type,
-            ], env=env)
+    try:
+        from tqdm import tqdm
+        pbar = tqdm(total=n_total, desc="  生成FASTQ", unit="株", ncols=80)
+    except ImportError:
+        pbar = None
 
-        # 合并不同读长
-        with open(fq_path, "w") as outfh:
-            for tmp_fq in temp_files:
-                with open(tmp_fq) as infh:
-                    outfh.write(infh.read())
-                tmp_fq.unlink()
+    n_done, n_skip = 0, 0
+    with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(_generate_one_fastq, *t): t[0] for t in tasks}
+        for future in concurrent.futures.as_completed(futures):
+            _, status = future.result()
+            if status == "done":
+                n_done += 1
+            else:
+                n_skip += 1
+            if pbar:
+                pbar.update(1)
+                pbar.set_postfix({"done": n_done, "skip": n_skip})
+    if pbar:
+        pbar.close()
 
-        total += 1
-        if total % 50 == 0:
-            log.info("  已处理 %d 个类病毒...", total)
-
-    log.info("生成了 %d 个 FASTQ 文件", total)
-
-    # 压缩
-    log.info("压缩 FASTQ 文件...")
-    fq_files = list(paths.fastq_dir.glob("*.fastq"))
-    for fq in fq_files:
-        run(["gzip", "-f", str(fq)], check=False)
-    log.info("压缩完成")
+    n_skipped = sum(1 for p in fa_files
+                    if (paths.fastq_dir / f"{p.name.replace('.fa', '')}.fastq.gz").exists())
+    log.info("FASTQ: %d 新生成, %d 跳过, %d 总计", n_done, n_skip, n_total)
 
 
 # =============================================================================
