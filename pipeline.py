@@ -212,9 +212,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     # ---- 输出 ----
     g = p.add_argument_group("输出配置")
     g.add_argument("--output-dir", default="./results",
-                   help="结果输出目录 (默认: ./results; 中间文件放 ./data)")
-    g.add_argument("--logs-dir", default="./logs",
-                   help="日志目录 (默认: ./logs)")
+                   help="结果输出目录 (默认: ./results)")
 
     # ---- 运行 ----
     g = p.add_argument_group("运行控制")
@@ -283,7 +281,7 @@ class Paths:
     def __init__(self, args: argparse.Namespace):
         self.output_dir = Path(args.output_dir).resolve()
         self.data_dir = self.output_dir / "data"
-        self.logs_dir = Path(args.logs_dir).resolve()
+        self.logs_dir = self.output_dir / "logs"
         self.genome_dir = self.data_dir / "genome"
         self.pstvd_dir = self.data_dir / "pstvd"
         self.scripts_dir = Path(__file__).resolve().parent / "scripts"
