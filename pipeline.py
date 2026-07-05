@@ -377,9 +377,15 @@ def stage_0_download_genome(args: argparse.Namespace, paths: Paths):
     paths.genome_dir.mkdir(parents=True, exist_ok=True)
     paths.genome_index.parent.mkdir(parents=True, exist_ok=True)
 
-    # --- 下载 ---
+    # --- 下载/复制 ---
+    target_fa = paths.genome_dir / f"{args.genome_name}.fa"
     if paths.genome_fa.exists():
         log.info("基因组已存在: %s", paths.genome_fa)
+        # 复制到输出目录 (如果还没复制)
+        if paths.genome_fa.resolve() != target_fa.resolve() and not target_fa.exists():
+            log.info("复制基因组到: %s", target_fa)
+            shutil.copy2(str(paths.genome_fa), str(target_fa))
+            paths.genome_fa = target_fa
     elif not args.genome_acc:
         die("基因组文件不存在且未指定 --genome-acc, 无法下载。"
             f"\n  期望路径: {paths.genome_fa}"
@@ -442,14 +448,26 @@ def stage_0_download_genome(args: argparse.Namespace, paths: Paths):
 
     # --- Bowtie2 索引 ---
     bt2_marker = Path(str(paths.genome_index) + ".1.bt2")
-    if bt2_marker.exists():
-        log.info("Bowtie2 索引已存在")
+    idx_file = Path(str(paths.genome_index) + ".1.bt2")
+    if bt2_marker.exists() and idx_file.exists() and idx_file.stat().st_size > 1000:
+        log.info("Bowtie2 索引已存在 (%s)", idx_file)
     else:
+        # 旧索引损坏则重建
+        if idx_file.exists() and idx_file.stat().st_size < 1000:
+            log.warning("索引损坏 (%s=%d bytes), 重建...", idx_file, idx_file.stat().st_size)
+            for f in Path(paths.genome_index).parent.glob(Path(paths.genome_index).name + "*.bt2"):
+                f.unlink()
+            bt2_marker.unlink(missing_ok=True)
         log.info("构建 Bowtie2 索引...")
+        # bowtie2-build 大基因组时线程过多容易OOM, 限8线程
+        build_threads = min(args.threads, 8)
         run([
-            "bowtie2-build", "--threads", str(args.threads),
-            "-f", str(paths.genome_fa), str(paths.genome_index),
+            "bowtie2-build", "--threads", str(build_threads),
+            str(paths.genome_fa), str(paths.genome_index),
         ], log_file=paths.logs_dir / "bowtie2_build.log")
+        # 验证
+        if not idx_file.exists() or idx_file.stat().st_size < 1000:
+            die(f"Bowtie2 索引构建失败: {idx_file} 大小异常")
         log.info("Bowtie2 索引构建完成")
 
 
