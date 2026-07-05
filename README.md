@@ -1,6 +1,21 @@
 # PSTVd 致病性预测管线
 
-基于 vd-sRNA 深度模式的 PSTVd (Potato spindle tuber viroid) 致病性预测。方法参考 Sun & Matsushita (2024), *Molecular Plant Pathology*。
+基于 vd-sRNA 深度模式的 PSTVd (Potato spindle tuber viroid) 致病性预测。
+
+## 参考文献
+
+> **Predicting symptom severity of PSTVd-infected tomato plants using PSTVd genome sequences**
+> Sun, Z. & Matsushita, Y. (2024). *Molecular Plant Pathology*, 25, e13469.
+> https://doi.org/10.1111/mpp.13469
+
+该方法模仿 RNA 沉默机制，仅需类病毒与宿主基因组序列即可预测致病性。核心步骤：(1) 合成短序列比对宿主基因组；(2) 计算比对覆盖率；(3) UMAP+DBSCAN 聚类。  
+原始代码: https://zenodo.org/records/10081178
+
+**本仓库为原始代码的增强版**，主要改进：
+- 原始 `pseudo_alignexp.sh` + `cluster_viroids.R` → `pipeline.py` (训练) + `predict_pstvd.R` (预测)
+- 新增 BLAST 筛选 Level 1 直接继承 + UMAP 多模型共识投票
+- 稀疏矩阵 (`summarize_coverage.py` v2.0)、断点续传、并行加速、命名参数 CLI
+- 预测结果自动生成 5 类可视化图
 
 ## 原理
 
@@ -193,6 +208,37 @@ Level 1 序列同时输出继承标签与聚类投票的对比验证。
   - Phase 1: `screening_results.csv` 存在且行数匹配 → 跳过
   - Phase 2: `new_depth.tsv.gz` 存在且列数足够 → 跳过
   - 逐文件检查: 每株的 FASTQ/BAM/depth 独立续传
+
+## 原始代码 vs 本仓库
+
+| | 原始 (Zenodo) | 本仓库 |
+|---|---|---|
+| 训练管线 | `pseudo_alignexp.sh` (shell) | `pipeline.py` (Python, 断点+并行) |
+| 聚类 | `cluster_viroids.R` (基础) | `cluster_analysis.R` (回退过滤+并行) |
+| 预测 | 无独立脚本 | `predict_pstvd.R` (BLAST+UMAP+多模型) |
+| 解读 | `analyze_viroidBAMs.R` | `interpret_results.R` (6图+预测表) |
+| 深度矩阵 | 密集矩阵 | `summarize_coverage.py` v2.0 稀疏矩阵 |
+| 分类 | 二元 mild/severe | mild/severe/no_signal/ambiguous + Level1继承 |
+| 数据 | 相同 (PSTVd300.fa/acn) | 相同 + metadata.tsv |
+
+核心算法 (`umap_cv` → `estimate_label` → `calc_f1`) 与原文一致，未改动。
+
+## 引用
+
+若使用本代码，请引用：
+
+```bibtex
+@article{sun2024predicting,
+  title   = {Predicting symptom severity of PSTVd-infected tomato plants
+             using PSTVd genome sequences},
+  author  = {Sun, Z. and Matsushita, Y.},
+  journal = {Molecular Plant Pathology},
+  volume  = {25},
+  pages   = {e13469},
+  year    = {2024},
+  doi     = {10.1111/mpp.13469}
+}
+```
 
 ## License
 
