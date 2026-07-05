@@ -377,74 +377,65 @@ def stage_0_download_genome(args: argparse.Namespace, paths: Paths):
     paths.genome_dir.mkdir(parents=True, exist_ok=True)
     paths.genome_index.parent.mkdir(parents=True, exist_ok=True)
 
-    # --- 下载/复制 ---
-    target_fa = paths.genome_dir / f"{args.genome_name}.fa"
-    if paths.genome_fa.exists():
-        log.info("基因组已存在: %s", paths.genome_fa)
-        # 复制到输出目录 (如果还没复制)
-        if paths.genome_fa.resolve() != target_fa.resolve() and not target_fa.exists():
-            log.info("复制基因组到: %s", target_fa)
-            shutil.copy2(str(paths.genome_fa), str(target_fa))
-            paths.genome_fa = target_fa
-    elif not args.genome_acc:
-        die("基因组文件不存在且未指定 --genome-acc, 无法下载。"
-            f"\n  期望路径: {paths.genome_fa}"
-            "\n  请提供 --genome-acc 或 --genome-fa")
-    else:
-        log.info("从 NCBI 下载基因组: %s", args.genome_acc)
-        acc = args.genome_acc
-        zip_path = paths.genome_dir / f"{acc}.zip"
+    # --- 准备基因组 FASTA: 统一复制到 output/data/genome/{name}.fa ---
+    target_fa = (paths.genome_dir / f"{args.genome_name}.fa").resolve()
 
-        if has_tool("datasets"):
-            run([
-                "datasets", "download", "genome", "accession", acc,
-                "--include", "genome",
-                "--filename", str(zip_path),
-            ])
+    # 场景1: 用户指定 --genome-fa → 复制到输出目录
+    if args.genome_fa:
+        src = Path(args.genome_fa).resolve()
+        if not src.exists():
+            die(f"基因组文件不存在: {src}")
+        if src != target_fa:
+            log.info("复制基因组: %s → %s", src.name, target_fa)
+            shutil.copy2(str(src), str(target_fa))
         else:
-            url = (
-                "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/"
-                f"accession/{acc}/download?include_annotation_type=GENOME_FASTA"
-            )
-            run(["curl", "-L", "-o", str(zip_path), url],
-                log_file=paths.logs_dir / "download_genome.log")
+            log.info("基因组已在输出目录: %s", target_fa)
 
-        if not zip_path.exists() or zip_path.stat().st_size < 1000:
-            die(f"基因组下载失败 ({acc})，请检查 accession 或网络。")
+    # 场景2: --genome-acc → NCBI下载
+    elif args.genome_acc:
+        if target_fa.exists():
+            log.info("基因组已存在: %s", target_fa)
+        else:
+            log.info("从 NCBI 下载基因组: %s", args.genome_acc)
+            acc = args.genome_acc
+            zip_path = paths.genome_dir / f"{acc}.zip"
+            if has_tool("datasets"):
+                run(["datasets", "download", "genome", "accession", acc,
+                     "--include", "genome", "--filename", str(zip_path)])
+            else:
+                run(["curl", "-L", "-o", str(zip_path),
+                     f"https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/{acc}/download?include_annotation_type=GENOME_FASTA"],
+                    log_file=paths.logs_dir / "download_genome.log")
+            if not zip_path.exists() or zip_path.stat().st_size < 1000:
+                die(f"基因组下载失败 ({acc})")
+            tmp_dir = paths.genome_dir / "_tmp_extract"
+            tmp_dir.mkdir(exist_ok=True)
+            run(["unzip", "-o", str(zip_path), "-d", str(tmp_dir)])
+            fasta_files = list(tmp_dir.rglob("*.fna")) + list(tmp_dir.rglob("*.fa")) + list(tmp_dir.rglob("*.fasta"))
+            if not fasta_files:
+                die("解压后未找到 FASTA 文件")
+            shutil.copy2(str(fasta_files[0]), str(target_fa))
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            zip_path.unlink(missing_ok=True)
+            log.info("基因组下载完成")
 
-        # 解压
-        tmp_dir = paths.genome_dir / "_tmp_extract"
-        tmp_dir.mkdir(exist_ok=True)
-        run(["unzip", "-o", str(zip_path), "-d", str(tmp_dir)])
+    else:
+        die("需要 --genome-fa 或 --genome-acc")
 
-        # 查找 FASTA 文件
-        fasta_files = list(tmp_dir.rglob("*.fna")) + list(tmp_dir.rglob("*.fa")) + \
-                      list(tmp_dir.rglob("*.fasta"))
-        if not fasta_files:
-            die("解压后未找到 FASTA 文件，请手动下载基因组。")
-        shutil.copy2(str(fasta_files[0]), str(paths.genome_fa))
-
-        # 清理
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        zip_path.unlink(missing_ok=True)
-        log.info("基因组下载完成: %s", paths.genome_fa)
+    paths.genome_fa = target_fa
 
     # --- 统计 ---
-    chrom_count = 0
-    genome_size = 0
-    with open(paths.genome_fa) as fh:
+    chrom_count = genome_size = 0
+    with open(target_fa) as fh:
         for line in fh:
-            if line.startswith(">"):
-                chrom_count += 1
-            else:
-                genome_size += len(line.strip())
-    log.info("基因组统计: %d 条序列, %d bp", chrom_count, genome_size)
+            if line.startswith(">"): chrom_count += 1
+            else: genome_size += len(line.strip())
+    log.info("基因组统计: %d 条序列, %.1f Gb", chrom_count, genome_size / 1e9)
 
     # --- .fai 索引 ---
-    fai = Path(str(paths.genome_fa) + ".fai")
+    fai = Path(str(target_fa) + ".fai")
     if not fai.exists():
-        run(["samtools", "faidx", str(paths.genome_fa)])
-        log.info(".fai 索引已生成")
+        run(["samtools", "faidx", str(target_fa)])
 
     # --- Bowtie2 索引 ---
     bt2_marker = Path(str(paths.genome_index) + ".1.bt2")
@@ -463,7 +454,7 @@ def stage_0_download_genome(args: argparse.Namespace, paths: Paths):
         build_threads = min(args.threads, 8)
         run([
             "bowtie2-build", "--threads", str(build_threads),
-            str(paths.genome_fa), str(paths.genome_index),
+            str(target_fa), str(paths.genome_index),
         ], log_file=paths.logs_dir / "bowtie2_build.log")
         # 验证
         if not idx_file.exists() or idx_file.stat().st_size < 1000:
