@@ -37,6 +37,7 @@ Stage:
 import argparse
 import logging
 import os
+import concurrent.futures
 import shlex
 import shutil
 import subprocess
@@ -555,93 +556,98 @@ def stage_2_generate_fastq(args: argparse.Namespace, paths: Paths):
 
 
 # =============================================================================
-# Stage 3: Bowtie2 比对
+# Stage 3-4: Bowtie2 比对 + 深度计算 (并行)
 # =============================================================================
+def _process_one_isolate(vid, fq_path, bowtie2_opts, bt2_cores, genome_index, bam_dir, depth_dir):
+    """单个分离株: bowtie2 → samtools sort → index → pysamstats → gzip"""
+    bam_path = Path(bam_dir) / f"{vid}.bam"
+    depth_path = Path(depth_dir) / f"{vid}.depth.gz"
+
+    if bam_path.exists() and depth_path.exists():
+        return (vid, "skipped")
+
+    if not bam_path.exists():
+        sam_path = Path(bam_dir) / f"{vid}.sam"
+        log_path = Path(bam_dir) / f"{vid}.bowtie2.log"
+        with open(log_path, "w") as lf:
+            subprocess.run(
+                ["bowtie2", *bowtie2_opts, "-p", str(bt2_cores),
+                 "-x", str(genome_index), "-U", str(fq_path), "-S", str(sam_path)],
+                stdout=lf, stderr=subprocess.STDOUT, check=True,
+            )
+        subprocess.run(["samtools", "sort", "-@", str(bt2_cores),
+                        str(sam_path), "-o", str(bam_path)], check=True)
+        sam_path.unlink(missing_ok=True)
+        subprocess.run(["samtools", "index", str(bam_path)], check=True)
+
+    if not depth_path.exists():
+        depth_raw = Path(depth_dir) / f"{vid}.depth"
+        with open(depth_raw, "w") as df:
+            subprocess.run(["pysamstats", "--type", "coverage", str(bam_path)],
+                           stdout=df, check=True)
+        subprocess.run(["gzip", "-f", str(depth_raw)], check=True)
+
+    return (vid, "done")
+
+
 def stage_3_align_reads(args: argparse.Namespace, paths: Paths):
-    log.info("=== Stage 3: Bowtie2 比对 ===")
+    log.info("=== Stage 3-4: Bowtie2 比对 + 深度计算 ===")
 
     bt2_marker = Path(str(paths.genome_index) + ".1.bt2")
     if not bt2_marker.exists():
         die("Bowtie2 索引不存在，请先运行 stage 0")
 
     paths.bam_dir.mkdir(parents=True, exist_ok=True)
+    paths.depth_dir.mkdir(parents=True, exist_ok=True)
     fq_files = sorted(paths.fastq_dir.glob("*.fastq.gz"))
-    total = 0
-    skipped = 0
 
+    bowtie2_opts = shlex.split(args.bowtie2_opts)
+    n_total = len(fq_files)
+
+    # 动态选并行度: 不大于CPU核数, 不超307个任务
+    n_workers = min(args.cluster_cores or 8, n_total, os.cpu_count() or 8)
+    bt2_cores = max(1, args.threads // n_workers)
+
+    log.info("并行 %d 进程, 各 %d 线程, %d 个分离株",
+             n_workers, bt2_cores, n_total)
+
+    # 准备任务列表
+    tasks = []
     for fq_path in fq_files:
         vid = fq_path.stem.replace(".fastq", "")
-        bam_path = paths.bam_dir / f"{vid}.bam"
+        tasks.append((vid, fq_path, bowtie2_opts, bt2_cores,
+                      paths.genome_index, paths.bam_dir, paths.depth_dir))
 
-        if bam_path.exists():
-            skipped += 1
-            continue
+    # 并行执行 + 进度条
+    try:
+        from tqdm import tqdm
+        pbar = tqdm(total=n_total, desc="  比对+深度", unit="株", ncols=80)
+    except ImportError:
+        pbar = None
 
-        log.info("  比对: %s", vid)
-        bowtie2_opts = shlex.split(args.bowtie2_opts)
+    n_done, n_skip = 0, 0
+    with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(_process_one_isolate, *t): t[0] for t in tasks}
+        for future in concurrent.futures.as_completed(futures):
+            vid, status = future.result()
+            if status == "done":
+                n_done += 1
+            else:
+                n_skip += 1
+            if pbar:
+                pbar.update(1)
+                pbar.set_postfix({"done": n_done, "skip": n_skip})
+            elif (n_done + n_skip) % 10 == 0:
+                log.info("  进度: %d/%d", n_done + n_skip, n_total)
+    if pbar:
+        pbar.close()
 
-        sam_path = paths.bam_dir / f"{vid}.sam"
-        log_path = paths.bam_dir / f"{vid}.bowtie2.log"
-
-        with open(log_path, "w") as lf:
-            subprocess.run(
-                [
-                    "bowtie2", *bowtie2_opts,
-                    "-p", str(args.threads),
-                    "-x", str(paths.genome_index),
-                    "-U", str(fq_path),
-                    "-S", str(sam_path),
-                ],
-                stdout=lf,
-                stderr=subprocess.STDOUT,
-                check=True,
-            )
-
-        run(["samtools", "sort", "-@", str(args.threads),
-             str(sam_path), "-o", str(bam_path)])
-        sam_path.unlink()
-        run(["samtools", "index", str(bam_path)])
-
-        total += 1
-        if total % 10 == 0:
-            log.info("  已比对 %d 个...", total)
-
-    log.info("比对完成: %d 个新处理, %d 个跳过", total, skipped)
+    log.info("比对+深度完成: %d 新处理, %d 跳过", n_done, n_skip)
 
 
-# =============================================================================
-# Stage 4: 计算覆盖深度
-# =============================================================================
+# Stage 4 已合并到 Stage 3, 保留空函数兼容断点
 def stage_4_calculate_depth(args: argparse.Namespace, paths: Paths):
-    log.info("=== Stage 4: 计算覆盖深度 ===")
-
-    paths.depth_dir.mkdir(parents=True, exist_ok=True)
-    bam_files = sorted(paths.bam_dir.glob("*.bam"))
-    total = 0
-    skipped = 0
-
-    for bam_path in bam_files:
-        vid = bam_path.stem
-        depth_path = paths.depth_dir / f"{vid}.depth"
-
-        if (paths.depth_dir / f"{vid}.depth.gz").exists():
-            skipped += 1
-            continue
-
-        run(["pysamstats", "--type", "coverage", str(bam_path)],
-            log_file=str(depth_path))
-
-        total += 1
-        if total % 10 == 0:
-            log.info("  已处理 %d 个...", total)
-
-    log.info("深度计算完成: %d 个新处理, %d 个跳过", total, skipped)
-
-    # 压缩
-    depth_files = list(paths.depth_dir.glob("*.depth"))
-    for df in depth_files:
-        run(["gzip", "-f", str(df)], check=False)
-    log.info("压缩完成")
+    log.info("=== Stage 4: 已合并到 Stage 3, 跳过 ===")
 
 
 # =============================================================================
@@ -863,6 +869,8 @@ def main(argv: List[str] = None):
         try:
             func(args, paths)
             ckpt.done(int(sid))
+            if sid == "3":
+                ckpt.done(4)  # Stage 4 已合并到 Stage 3
             log.info("Stage %s 完成 ✓", sid)
         except Exception as e:
             log.error("Stage %s 失败: %s", sid, e)
