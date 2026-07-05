@@ -438,25 +438,29 @@ def stage_0_download_genome(args: argparse.Namespace, paths: Paths):
     # --- Bowtie2 索引 ---
     bt2_marker = Path(str(paths.genome_index) + ".1.bt2")
     idx_file = Path(str(paths.genome_index) + ".1.bt2")
-    if bt2_marker.exists() and idx_file.exists() and idx_file.stat().st_size > 1000:
+    rev_file = Path(str(paths.genome_index) + ".rev.1.bt2")
+    if bt2_marker.exists() and idx_file.exists() and idx_file.stat().st_size > 1000 and rev_file.exists():
         log.info("Bowtie2 索引已存在 (%s)", idx_file)
     else:
-        # 旧索引损坏则重建
-        if idx_file.exists() and idx_file.stat().st_size < 1000:
-            log.warning("索引损坏 (%s=%d bytes), 重建...", idx_file, idx_file.stat().st_size)
+        if idx_file.exists():
+            log.warning("索引不完整 (%s=%d bytes, rev=%s), 重建...",
+                       idx_file, idx_file.stat().st_size, rev_file.exists())
             for f in Path(paths.genome_index).parent.glob(Path(paths.genome_index).name + "*.bt2"):
+                f.unlink()
+            for f in Path(paths.genome_index).parent.glob(Path(paths.genome_index).name + "*.sa"):
                 f.unlink()
             bt2_marker.unlink(missing_ok=True)
         log.info("构建 Bowtie2 索引...")
-        # bowtie2-build 大基因组时线程过多容易OOM, 限8线程
-        build_threads = min(args.threads, 8)
         run([
-            "bowtie2-build", "--threads", str(build_threads),
+            "bowtie2-build", "--threads", str(args.threads), "--large-index",
             str(target_fa), str(paths.genome_index),
         ], log_file=paths.logs_dir / "bowtie2_build.log")
-        # 验证
+        # 验证: .1.bt2 非空且 .rev.1.bt2 存在(大索引必需)
+        rev1 = Path(str(paths.genome_index) + ".rev.1.bt2")
         if not idx_file.exists() or idx_file.stat().st_size < 1000:
-            die(f"Bowtie2 索引构建失败: {idx_file} 大小异常")
+            die(f"Bowtie2 索引构建失败: {idx_file}")
+        if not rev1.exists():
+            die(f"Bowtie2 索引构建失败: 缺少 {rev1}")
         log.info("Bowtie2 索引构建完成")
 
 
