@@ -821,10 +821,11 @@ def main(argv: List[str] = None):
     paths = Paths(args)
     ckpt = Checkpoint(paths.logs_dir, force=args.force)
 
+    genome_id = args.genome_acc or str(paths.genome_fa.name)
     banner = f"""
 ╔══════════════════════════════════════════════════════════╗
 ║  PSTVd 致病力预测管线                                   ║
-║  Genome: {args.genome_acc:<44} ║
+║  Genome: {genome_id:<44} ║
 ║  Name:   {args.genome_name:<44} ║
 ║  Time:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S'):<44} ║
 ╚══════════════════════════════════════════════════════════╝
