@@ -670,7 +670,8 @@ if (file.exists(new_depth_gz) && nrow(level2) > 0) {
         for (i in seq_along(viroid_names)) {
             if (true_labels[i] != 'unknown') next
             pt_row <- pred_table[pred_table$viroid == viroid_names[i], ]
-            if (nrow(pt_row) > 0 && !is.na(pt_row$consensus[1])) {
+            if (nrow(pt_row) > 0 && !is.na(pt_row$consensus[1]) &&
+                !is.na(pt_row$confidence[1]) && pt_row$confidence[1] >= 0.9) {
                 true_labels[i] <- pt_row$consensus[1]
             }
         }
